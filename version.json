@@ -1,6 +1,6 @@
 {
-   "version": "2.20",
-   "notes": "Adds verified self-updates for packaged Windows executables.",
+   "version": "2.21",
+   "notes": "Adds POS1 Print Spooler remote controls.",
    "exeAsset": "EMBED_Services_Dashboard.exe",
-   "releaseTag": "v2.20"
+   "releaseTag": "v2.21"
 }
