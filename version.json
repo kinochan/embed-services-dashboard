@@ -1,3 +1,6 @@
 {
-   "version": "2.19"
+   "version": "2.20",
+   "notes": "Adds verified self-updates for packaged Windows executables.",
+   "exeAsset": "EMBED_Services_Dashboard.exe",
+   "releaseTag": "v2.20"
 }
