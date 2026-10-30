@@ -248,7 +248,7 @@ function Save-Config {
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="EMBED Services Dashboard v$($script:AppVersion)"
-    Width="1120" Height="950"
+    Width="900" Height="950"
     MinWidth="860" MinHeight="520"
     WindowStartupLocation="CenterScreen"
     Background="#1E1E2E"
