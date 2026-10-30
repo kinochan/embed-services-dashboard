@@ -31,7 +31,7 @@ if (-not $script:IsAdmin) {
     }
     exit
 }
-$script:AppVersion = "2.20"
+$script:AppVersion = "2.21"
 # Service definitions
 $script:ServiceDefs = @(
     [ordered]@{ Name = 'ECSGenSvc';         Display = 'EMBED General Service';      Group = 'Core' }
