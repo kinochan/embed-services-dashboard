@@ -20,7 +20,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = "2.18"
+$script:AppVersion = "2.19"
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -120,6 +120,8 @@ $script:BackupWarnDays = 1      # last full backup older than this = yellow
 $script:BackupRedDays  = 7      # ...older than this = red
 $script:ActiveFilter   = 'All'
 $script:ServiceCache   = @{}
+$script:ServiceResourceMetrics = @{}
+$script:PreviousProcessSamples = @{}
 $script:DisabledServices = @{}   # services the user switched off (saved to config)
 $script:AutoOff = @{}            # services auto-switched off, e.g. not installed (not saved, rechecked each scan)
 $script:OfflineEvents = @{}      # service name -> timestamps of recent offline events (for email alerts)
@@ -1618,9 +1620,10 @@ function Get-ServiceEvents {
     -ErrorAction Stop
         $results = foreach ($event in $events) {
             $matchedService = $null
-            foreach ($svc in $script:ServiceDefs.Name) {
-                if ($event.Message -match [regex]::Escape($svc)) {
-                    $matchedService = $svc
+            foreach ($svc in $script:ServiceDefs) {
+                if (($event.Message -match [regex]::Escape($svc.Name)) -or
+                    ($svc.Display -and $event.Message -match [regex]::Escape($svc.Display))) {
+                    $matchedService = $svc.Display
                     break
                 }
             }
@@ -1657,7 +1660,10 @@ function Get-ServiceEvents {
             Select-Object -First $MaxEvents
     }
     catch {
-        return @()
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
+            return @()
+        }
+        throw
     }
 }
 # SAFE SERVICE QUERY + CONTROL
@@ -1681,6 +1687,94 @@ function Get-SafeServiceStatus([string]$Name) {
             Error     = $_.Exception.Message
         }
     }
+}
+function Get-ServiceResourceMetrics {
+    $metrics = @{}
+    foreach ($def in $script:ServiceDefs) {
+        $metrics[$def.Name] = [PSCustomObject]@{
+            CpuPercent = $null
+            MemoryMB   = $null
+            ReadMBps   = $null
+            WriteMBps  = $null
+            ProcessId  = 0
+            Note       = 'Service is not running'
+        }
+    }
+
+    try {
+        $serviceProcesses = @(Get-CimInstance -ClassName Win32_Service |
+            Where-Object { $_.Name -in $script:ServiceDefs.Name -and $_.State -eq 'Running' -and $_.ProcessId -gt 0 })
+        $processIds = @($serviceProcesses.ProcessId | Sort-Object -Unique)
+        if ($processIds.Count -eq 0) {
+            $script:PreviousProcessSamples = @{}
+            return $metrics
+        }
+
+        $filter = ($processIds | ForEach-Object { "ProcessId=$_" }) -join ' OR '
+        $now = Get-Date
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter $filter)
+        $nextSamples = @{}
+        foreach ($process in $processes) {
+            $processId = [int]$process.ProcessId
+            $nextSamples[$processId] = [PSCustomObject]@{
+                Time             = $now
+                CpuTime100ns     = [double]$process.KernelModeTime + [double]$process.UserModeTime
+                ReadTransferCount  = [double]$process.ReadTransferCount
+                WriteTransferCount = [double]$process.WriteTransferCount
+                MemoryMB         = [Math]::Round(([double]$process.WorkingSetSize / 1MB), 1)
+                CreationDate      = [string]$process.CreationDate
+            }
+        }
+
+        $processorCount = [Math]::Max(1, [Environment]::ProcessorCount)
+        foreach ($service in $serviceProcesses) {
+            $processId = [int]$service.ProcessId
+            $processSample = $nextSamples[$processId]
+            if (-not $processSample) {
+                $metrics[$service.Name] = [PSCustomObject]@{
+                    CpuPercent = $null; MemoryMB = $null; ReadMBps = $null; WriteMBps = $null
+                    ProcessId = $processId; Note = 'Process metrics are unavailable'
+                }
+                continue
+            }
+
+            $previous = $script:PreviousProcessSamples[$processId]
+            $cpuPercent = $null
+            $readMBps = $null
+            $writeMBps = $null
+            if ($previous) {
+                $elapsed = ($now - $previous.Time).TotalSeconds
+                if ($elapsed -gt 0 -and
+                    $processSample.CreationDate -eq $previous.CreationDate -and
+                    $processSample.CpuTime100ns -ge $previous.CpuTime100ns -and
+                    $processSample.ReadTransferCount -ge $previous.ReadTransferCount -and
+                    $processSample.WriteTransferCount -ge $previous.WriteTransferCount) {
+                    $cpuPercent = [Math]::Round((($processSample.CpuTime100ns - $previous.CpuTime100ns) / 10000000 / $elapsed / $processorCount) * 100, 1)
+                    $readMBps = [Math]::Round((($processSample.ReadTransferCount - $previous.ReadTransferCount) / 1MB / $elapsed), 2)
+                    $writeMBps = [Math]::Round((($processSample.WriteTransferCount - $previous.WriteTransferCount) / 1MB / $elapsed), 2)
+                }
+            }
+            $metrics[$service.Name] = [PSCustomObject]@{
+                CpuPercent = $cpuPercent
+                MemoryMB   = $processSample.MemoryMB
+                ReadMBps   = $readMBps
+                WriteMBps  = $writeMBps
+                ProcessId  = $processId
+                Note       = if ($null -eq $cpuPercent) { 'Rates available after the next refresh' } else { '' }
+            }
+        }
+        $script:PreviousProcessSamples = $nextSamples
+    }
+    catch {
+        $errorMessage = $_.Exception.Message
+        foreach ($def in $script:ServiceDefs) {
+            $metrics[$def.Name] = [PSCustomObject]@{
+                CpuPercent = $null; MemoryMB = $null; ReadMBps = $null; WriteMBps = $null
+                ProcessId = 0; Note = "Metrics unavailable: $errorMessage"
+            }
+        }
+    }
+    return $metrics
 }
 function Start-ServiceSafe([string]$name) {
     try {
@@ -1724,8 +1818,8 @@ function Build-ServiceRows {
         $card.Padding      = New-Object Windows.Thickness(16, 12, 16, 12)
         $card.Tag          = $def.Group
         $grid = New-Object Windows.Controls.Grid
-        # Columns: Dot | Info | Status | Toggle
-        foreach ($w in @('Auto', '*', 'Auto', 'Auto')) {
+        # Columns: Dot | Info | Resources | Status | Toggle
+        foreach ($w in @('Auto', '*', 'Auto', 'Auto', 'Auto')) {
             $cd = New-Object Windows.Controls.ColumnDefinition
             $cd.Width = if ($w -eq '*') {
                 New-Object Windows.GridLength(1, [Windows.GridUnitType]::Star)
@@ -1770,6 +1864,14 @@ function Build-ServiceRows {
         $svcTb.Margin     = New-Object Windows.Thickness(0,2,0,0)
         $infoStack.Children.Add($nameRow) | Out-Null
         $infoStack.Children.Add($svcTb)   | Out-Null
+        $metricsTb = New-Object Windows.Controls.TextBlock
+        $metricsTb.Text = 'CPU --  MEM --  Disk R/W --'
+        $metricsTb.FontSize = 11
+        $metricsTb.Foreground = ColorBrush '#A6ADC8'
+        $metricsTb.VerticalAlignment = 'Center'
+        $metricsTb.Margin = New-Object Windows.Thickness(12,0,16,0)
+        $metricsTb.ToolTip = 'Process-level metrics: CPU is a share of total system capacity, memory is working set, and disk is read/write I/O rate. Services sharing a process show the same values. Rates need two refresh samples.'
+        [Windows.Controls.Grid]::SetColumn($metricsTb, 2)
         # Status text
         $statusTb = New-Object Windows.Controls.TextBlock
         $statusTb.FontSize   = 12
@@ -1777,14 +1879,14 @@ function Build-ServiceRows {
         $statusTb.VerticalAlignment = 'Center'
         $statusTb.HorizontalAlignment = 'Right'
         $statusTb.Margin = New-Object Windows.Thickness(0,0,16,0)
-        [Windows.Controls.Grid]::SetColumn($statusTb, 2)
+        [Windows.Controls.Grid]::SetColumn($statusTb, 3)
         # Monitor on/off switch
         $chk = New-Object Windows.Controls.CheckBox
         $chk.Style     = $window.FindResource('SwitchToggle')
         $chk.Tag       = $def.Name
         $chk.IsChecked = -not $script:DisabledServices.ContainsKey($def.Name)
         $chk.ToolTip   = 'On = monitored and included in Start/Stop/Restart All'
-        [Windows.Controls.Grid]::SetColumn($chk, 3)
+        [Windows.Controls.Grid]::SetColumn($chk, 4)
         $chk.Add_Click({
             $n = [string]$this.Tag
             $d = $script:ServiceRows[$n].Def
@@ -1798,6 +1900,7 @@ function Build-ServiceRows {
         # Add elements to grid
         $grid.Children.Add($dot)       | Out-Null
         $grid.Children.Add($infoStack) | Out-Null
+        $grid.Children.Add($metricsTb) | Out-Null
         $grid.Children.Add($statusTb)  | Out-Null
         $grid.Children.Add($chk)       | Out-Null
         # Add card to panel
@@ -1806,6 +1909,7 @@ function Build-ServiceRows {
         $script:ServiceRows[$def.Name] = [PSCustomObject]@{
             Card     = $card
             Dot      = $dot
+            MetricsTb = $metricsTb
             StatusTb = $statusTb
             NoteTb   = $svcTb
             Toggle   = $chk
@@ -1916,15 +2020,20 @@ function Add-HistoryEntry {
     $statEvents.Text = [string]$script:HistoryList.Count
 }
 function Refresh-EventsGrid {
+    $events = @(Get-ServiceEvents)
     $script:EventList.Clear()
-    foreach ($event in (Get-ServiceEvents)) {
+    foreach ($event in $events) {
         $script:EventList.Add($event)
     }
 }
 $btnRefreshEvents.Add_Click({
-    Refresh-EventsGrid
-    $statusBar.Text =
-        "Event list refreshed."
+    try {
+        Refresh-EventsGrid
+        $statusBar.Text = "Event list refreshed."
+    }
+    catch {
+        $statusBar.Text = "Could not refresh event list: $($_.Exception.Message)"
+    }
 })
 $btnClearEvents.Add_Click({
     $script:EventList.Clear()
@@ -2487,6 +2596,23 @@ $btnDscIgnore.Add_Click({
 # ------------------------------------------------------------
 # UPDATE SERVICE ROWS
 # ------------------------------------------------------------
+function Update-ServiceResourceMetricDisplay {
+    param($Row, $Metrics)
+    if (-not $Metrics) {
+        $Row.MetricsTb.Text = 'CPU --  MEM --  Disk R/W --'
+        return
+    }
+
+    $cpuText = if ($null -eq $Metrics.CpuPercent) { '--' } else { '{0:N1}%' -f $Metrics.CpuPercent }
+    $memoryText = if ($null -eq $Metrics.MemoryMB) { '--' } else { '{0:N1} MB' -f $Metrics.MemoryMB }
+    $readText = if ($null -eq $Metrics.ReadMBps) { '--' } else { '{0:N2}' -f $Metrics.ReadMBps }
+    $writeText = if ($null -eq $Metrics.WriteMBps) { '--' } else { '{0:N2}' -f $Metrics.WriteMBps }
+    $Row.MetricsTb.Text = "CPU $cpuText  MEM $memoryText  Disk R/W $readText/$writeText MB/s"
+    $tooltip = 'Process-level metrics: CPU is a share of total system capacity, memory is working set, and disk is read/write I/O rate. Services sharing a process show the same values.'
+    if ($Metrics.ProcessId -gt 0) { $tooltip += " Process ID: $($Metrics.ProcessId)." }
+    if ($Metrics.Note) { $tooltip += " $($Metrics.Note)" }
+    $Row.MetricsTb.ToolTip = $tooltip
+}
 function Update-ServiceRow {
     param([string]$Name)
     $row = $script:ServiceRows[$Name]
@@ -2497,6 +2623,7 @@ function Update-ServiceRow {
         $st = Get-SafeServiceStatus $def.Name
         $script:ServiceCache[$def.Name] = $st
     }
+    Update-ServiceResourceMetricDisplay $row $script:ServiceResourceMetrics[$def.Name]
     $wasAuto = $script:AutoOff.ContainsKey($def.Name)
 
     # Not installed on this machine: switch the toggle off automatically and say why
@@ -2551,6 +2678,7 @@ function Update-ServiceRow {
     }
 }
 function Update-AllServices {
+    $script:ServiceResourceMetrics = Get-ServiceResourceMetrics
     $script:ServiceCache = @{}
     foreach ($def in $script:ServiceDefs) {
         $script:ServiceCache[$def.Name] = Get-SafeServiceStatus $def.Name
