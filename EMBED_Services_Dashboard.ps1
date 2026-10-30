@@ -178,6 +178,9 @@ $script:SnapshotConfig = @{ KeepCount = 5; MaxAgeDays = 14 }       # saved to co
 $script:SnapshotJob    = $null
 $script:RemoteJob      = $null
 $script:RemoteList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$script:RemoteServiceDefs = @(
+    [ordered]@{ Computer = 'POS1'; Name = 'Spooler'; Display = 'Print Spooler' }
+)
 $script:DbVerJob       = $null                                     # background database version check
 $script:DbVer          = $null                                     # last result (shown in the header badge)
 $script:LastDbVerCheck = [datetime]::MinValue
@@ -3584,7 +3587,7 @@ $btnSnapOpen.Add_Click({
 # REMOTE SERVICES (control EMBED services on another PC)
 # ------------------------------------------------------------
 $dgRemote.ItemsSource = $script:RemoteList
-# Background job: optional Stop/Start/Restart of $targets (in order; stop runs in reverse), then reads the status of every EMBED service.
+# Background job: optional Stop/Start/Restart of $targets (in order; stop runs in reverse), then reads the requested remote services.
 $script:RemoteSvcScript = {
     param($computer, $action, $targets, $queryNames)
     Add-Type -AssemblyName System.ServiceProcess
@@ -3661,16 +3664,47 @@ function Get-RemoteHostFor($dev) {
     if ($dev.Status -in @('Online (no DNS)', 'Unresolved') -and $dev.LastKnownIP) { return [string]$dev.LastKnownIP }
     return [string]$dev.Name
 }
+function Get-RemoteServiceSelection([string]$Computer) {
+    $display = @{}
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($def in $script:ServiceDefs) {
+        $names.Add([string]$def.Name)
+        $display[$def.Name] = $def.Display
+    }
+    foreach ($extra in $script:RemoteServiceDefs) {
+        $matchesComputer = $Computer -ieq $extra.Computer -or
+            $Computer -match ('^{0}\.' -f [regex]::Escape([string]$extra.Computer))
+        if (-not $matchesComputer) {
+            $matchesComputer = @($script:Devices | Where-Object {
+                $_.Name -ieq $extra.Computer -and $_.LastKnownIP -eq $Computer
+            }).Count -gt 0
+        }
+        if ($matchesComputer) {
+            $names.Add([string]$extra.Name)
+            $display[$extra.Name] = $extra.Display
+        }
+    }
+    return [PSCustomObject]@{ Names = [string[]]$names.ToArray(); DisplayNames = $display }
+}
 function Start-RemoteJob([string]$Action, [string[]]$Targets) {
     $computer = $txtRemHost.Text.Trim()
     if (-not $computer) { Set-RemoteStatus 'Enter a computer name or IP first.' '#F38BA8'; return }
     if ($computer -notmatch '^[A-Za-z0-9._-]+$') { Set-RemoteStatus 'Use letters, numbers, dots, dashes or underscores only.' '#F38BA8'; return }
     if ($script:RemoteJob) { Set-RemoteStatus 'Still working on the last request...' '#89B4FA'; return }
-    $names = [string[]]@($script:ServiceDefs | ForEach-Object { $_.Name })
+    $selection = Get-RemoteServiceSelection $computer
+    if ($Action -ne 'Query') {
+        foreach ($target in $Targets) {
+            if ($target -notin $selection.Names) {
+                Set-RemoteStatus "The selected service is not configured for $computer. Load that computer's services again." '#F38BA8'
+                return
+            }
+        }
+    }
+    $script:RemoteDisplayNames = $selection.DisplayNames
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:RemoteSvcScript.ToString()).AddArgument($computer).AddArgument($Action).AddArgument([string[]]@($Targets)).AddArgument($names)
+        [void]$ps.AddScript($script:RemoteSvcScript.ToString()).AddArgument($computer).AddArgument($Action).AddArgument([string[]]@($Targets)).AddArgument($selection.Names)
         $script:RemoteJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Action = $Action }
         Set-RemoteButtons $false
         $verb = @{ Query = 'Loading services'; Start = 'Starting'; Stop = 'Stopping'; Restart = 'Restarting' }[$Action]
@@ -3691,7 +3725,7 @@ function Complete-RemoteJob {
     finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
     if (-not $res) { Set-RemoteStatus 'The request returned nothing.' '#F38BA8'; return }
 
-    $display = @{}; foreach ($d in $script:ServiceDefs) { $display[$d.Name] = $d.Display }
+    $display = $script:RemoteDisplayNames
     foreach ($l in @($res.Log)) {
         Add-HistoryEntry -ServiceName "$($res.Computer): $($display[$l.Name])" -Group 'Remote' -OldStatus '' -NewStatus $l.Result -Note $l.Note
     }
@@ -3711,7 +3745,7 @@ function Complete-RemoteJob {
         $f = $failed[0]
         Set-RemoteStatus ("{0} action(s) failed on {1}. {2}: {3}{4}" -f $failed.Count, $res.Computer, $display[$f.Name], $f.Note, (Get-RemoteHint $f.Note)) '#F38BA8'
     } elseif ($job.Action -eq 'Query') {
-        Set-RemoteStatus ("Loaded {0} EMBED service(s) from {1} at {2} ({3} not installed there)." -f $script:RemoteList.Count, $res.Computer, $when, $notInstalled) '#A6E3A1'
+        Set-RemoteStatus ("Loaded {0} service(s) from {1} at {2} ({3} not installed there)." -f $script:RemoteList.Count, $res.Computer, $when, $notInstalled) '#A6E3A1'
     } else {
         Set-RemoteStatus ("{0} finished on {1} at {2}." -f $job.Action, $res.Computer, $when) '#A6E3A1'
     }
