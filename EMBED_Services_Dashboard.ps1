@@ -2,8 +2,25 @@
 <#
 EMBED Services Dashboard - Enhanced Edition (Optimized)
 WPF dashboard for monitoring and controlling EMBED Windows services.
-Features: Minimize-to-Tray, Windows Event Viewer, Status History Panel, Service Control Panel, health colors,
-Support Snapshots (auto-cleanup), Remote Services control, persistent History logs.
+Features: Minimize-to-Tray, Windows Event Viewer, Status History Panel, Service Control Panel,
+health colors, dependency-aware service ordering, AnyDesk monitoring, Access Points / UniFi,
+reader availability checks, Support Snapshots (auto-cleanup), Remote Services control,
+persistent History logs.
+v2.18: per-service Restart button, Devices tab initially showed TeamViewer services only,
+       Support Login on the SQL tab (add / reset an EMBED login without opening SQL).
+v2.19: Readers tab hides old readers with no swiper unit, pings each reader (Online column replaces Status),
+       Connect (RDP) joins the signed-in user's session instead of locking them out,
+       Support Login: fixed "Embed" prefix, new logins are created as support users (user_type 1).
+v2.20: Support Login prefix is EMBED (all caps) and Add / Reset also sets existing logins to support (user_type 1),
+       Open UniFi starts the UniFi app on this server first and waits for it, default address https://localhost:8443.
+v2.20.1: same as v2.20 without the Support Login card - the SQL tab is fully read-only again.
+Combined build: retains the v2.20.1 Readers and Access Points features and adds the v2.21
+                Event Viewer, AnyDesk monitoring, and dependency-aware service ordering.
+v2.21.2: Remote Services lists TeamViewer, Print Spooler, AnyDesk services, and AnyDesk.exe.
+v2.22.0: Adds fixed remote-admin tasks over WinRM for RDP and approved service checks/actions.
+v2.22.1: Supports HTTP WinRM with an exact TrustedHosts entry as well as HTTPS.
+v2.22.2: Adds WMI/DCOM as an alternative transport for fixed remote-admin tasks.
+v2.22.3: Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -13,25 +30,15 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$script:SelfPath = [string]$PSCommandPath
-if (-not $script:SelfPath) {
-    $script:SelfPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-}
-$hostExeName = [IO.Path]::GetFileNameWithoutExtension($script:SelfPath)
-$script:IsPackagedExe = ([IO.Path]::GetExtension($script:SelfPath) -ieq '.exe') -and
-    ($hostExeName -notin @('powershell', 'powershell_ise', 'pwsh'))
 # Elevation check
 $script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $script:IsAdmin) {
-    if ($script:IsPackagedExe) {
-        Start-Process -FilePath $script:SelfPath -Verb RunAs
-    } else {
-        Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
-    }
+    Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = "2.21"
+$script:AppVersion = '2.22.3'
+$script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
     [ordered]@{ Name = 'ECSGenSvc';         Display = 'EMBED General Service';      Group = 'Core' }
@@ -45,72 +52,30 @@ $script:ServiceDefs = @(
     [ordered]@{ Name = 'TeamViewer';        Display = 'TeamViewer';                 Group = 'Remote'; MonitorOnly = $true }
     [ordered]@{ Name = 'AnyDesk';           Display = 'AnyDesk';                    Group = 'Remote'; MonitorOnly = $true }
 )
-# Service Dependency Check
+# Service dependencies used to determine a safe start/stop order.
 $script:ServiceDependencies = @{
     MSSQLSERVER = @()
-    SQLBrowser = @(
-        'MSSQLSERVER'
-    )
-    ECSGenSvc = @(
-        'MSSQLSERVER'
-    )
-    EmbedAPI = @(
-        'MSSQLSERVER'
-    )
-    ECSInterface = @(
-        'MSSQLSERVER'
-    )
-    EcsReportsService = @(
-        'MSSQLSERVER'
-    )
-    'Embed-ESP' = @(
-        'EmbedAPI'
-    )
-    'ECS-KioskService' = @(
-        'ECSGenSvc'
-    )
-}
-# Dependency Health Check
-function Get-ServiceDependencyState {
-    param([string]$ServiceName)
-    $deps = $script:ServiceDependencies[$ServiceName]
-    if (-not $deps) {
-        return @()
-    }
-    $failed = @()
- foreach ($dep in $deps) {
-    $depStatus = Get-SafeServiceStatus $dep
-    if ($depStatus.Status -ne 'Running') {
-        $failed += [PSCustomObject]@{
-            Name   = $dep
-            Status = $depStatus.Status
-        }
-    }
-}
-    return $failed
+    SQLBrowser = @('MSSQLSERVER')
+    ECSGenSvc = @('MSSQLSERVER')
+    EmbedAPI = @('MSSQLSERVER')
+    ECSInterface = @('MSSQLSERVER')
+    EcsReportsService = @('MSSQLSERVER')
+    'Embed-ESP' = @('EmbedAPI')
+    'ECS-KioskService' = @('ECSGenSvc')
 }
 function Get-ServiceStartOrder {
     $ordered = New-Object System.Collections.Generic.List[string]
     $visited = @{}
     function Add-ServiceRecursive {
         param([string]$ServiceName)
-        if ($visited.ContainsKey($ServiceName)) {
-            return
-        }
+        if ($visited.ContainsKey($ServiceName)) { return }
         $visited[$ServiceName] = $true
-        $deps = $script:ServiceDependencies[$ServiceName]
-        if ($deps) {
-            foreach ($dep in $deps) {
-                Add-ServiceRecursive $dep
-            }
+        foreach ($dependency in @($script:ServiceDependencies[$ServiceName])) {
+            Add-ServiceRecursive $dependency
         }
-        if (-not $ordered.Contains($ServiceName)) {
-            $ordered.Add($ServiceName)
-        }
+        if (-not $ordered.Contains($ServiceName)) { $ordered.Add($ServiceName) }
     }
-    foreach ($svc in $script:ServiceDefs.Name) {
-        Add-ServiceRecursive $svc
-    }
+    foreach ($service in $script:ServiceDefs.Name) { Add-ServiceRecursive $service }
     return $ordered
 }
 # Runtime state
@@ -178,9 +143,10 @@ $script:SnapshotConfig = @{ KeepCount = 5; MaxAgeDays = 14 }       # saved to co
 $script:SnapshotJob    = $null
 $script:RemoteJob      = $null
 $script:RemoteList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
-$script:RemoteServiceDefs = @(
-    [ordered]@{ Computer = 'POS1'; Name = 'Spooler'; Display = 'Print Spooler' }
-)
+$script:RemoteAdminJob = $null
+$script:RemoteAdminList = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$script:RemoteAdminListHost = ''
+$script:RemoteAdminListTransport = ''
 $script:DbVerJob       = $null                                     # background database version check
 $script:DbVer          = $null                                     # last result (shown in the header badge)
 $script:LastDbVerCheck = [datetime]::MinValue
@@ -190,6 +156,11 @@ $script:Packages       = New-Object System.Collections.ObjectModel.ObservableCol
 $script:SwJob          = $null
 $script:SwLog          = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'   # progress lines from the software job
 $script:SwTimeoutMin   = 30                                        # give up waiting on an installer after this long
+$script:ApConfig       = @{ RangeStart = '10.10.8.2'; RangeEnd = '10.10.8.254'; PingSecs = 60; UnifiUrl = 'https://localhost:8443' }   # saved to config.json
+$script:ApList         = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]   # Access Points tab (known APs saved)
+$script:ApJob          = $null
+$script:ApCountdown    = 60
+$script:ApScanned      = $false   # a full range scan has run this session
 $script:TrayState      = ''
 $script:TrayHIcon      = [IntPtr]::Zero
 # Start order (stop runs in reverse). CONFIRM this matches EMBED's real dependencies.
@@ -197,7 +168,9 @@ $script:StartOrder = Get-ServiceStartOrder
 if (-not ('Win32.NativeIcon' -as [type])) {
     Add-Type -Namespace Win32 -Name NativeIcon -MemberDefinition '[DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr hIcon);'
 }
+# ------------------------------------------------------------
 # CONFIG FILE FUNCTIONS
+# ------------------------------------------------------------
 function Test-Skipped([string]$Name) {
     return ($script:DisabledServices.ContainsKey($Name) -or $script:AutoOff.ContainsKey($Name))
 }
@@ -226,6 +199,11 @@ function Save-Config {
         @{
             RefreshSeconds   = $RefreshSeconds
             DeviceSeconds    = $script:DeviceSecs
+            AccessPoints     = @{
+                RangeStart = $script:ApConfig['RangeStart']; RangeEnd = $script:ApConfig['RangeEnd']
+                PingSecs   = $script:ApConfig['PingSecs'];   UnifiUrl = $script:ApConfig['UnifiUrl']
+                Known      = @($script:ApList | ForEach-Object { @{ Ip = $_.Ip; Name = $_.Name; LastSeen = $_.LastSeen } })
+            }
             DisabledServices = @($script:DisabledServices.Keys)
             Smtp             = $script:SmtpConfig
             IgnoredHosts     = @($script:IgnoredHosts.Keys)
@@ -245,13 +223,15 @@ function Save-Config {
         $statusBar.Text = "Config save failed: $($_.Exception.Message)"
     }
 }
+# ------------------------------------------------------------
 # XAML
+# ------------------------------------------------------------
 [xml]$XAML = @"
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="EMBED Services Dashboard v$($script:AppVersion)"
-    Width="900" Height="950"
+    Width="1120" Height="820"
     MinWidth="860" MinHeight="520"
     WindowStartupLocation="CenterScreen"
     Background="#1E1E2E"
@@ -508,7 +488,7 @@ function Save-Config {
           <Ellipse Width="10" Height="10" Fill="#CBA6F7" Margin="0,0,8,0"/>
           <TextBlock Text="EMBED" FontSize="17" FontWeight="Bold"
                      Foreground="#CBA6F7" VerticalAlignment="Center"/>
-          <TextBlock Text=" Services Dashboard v$script:AppVersion" FontSize="17" FontWeight="Light"
+          <TextBlock Text=" Services Dashboard" FontSize="17" FontWeight="Light"
                      Foreground="#CDD6F4" VerticalAlignment="Center"/>
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal"
@@ -606,75 +586,42 @@ function Save-Config {
               </DataGrid>
             </Grid>
           </TabItem>
-                     <!-- Events -->
-      <TabItem Header="  Events  " Style="{StaticResource SubTabItem}">
-        <Grid Background="#1E1E2E">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-          <!-- Header -->
-          <Border Grid.Row="0"
-                  Background="#181825"
-                  Padding="16,9">
-            <Grid>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-              </Grid.ColumnDefinitions>
-              <TextBlock
-                  Grid.Column="0"
-                  Foreground="#6C7086"
-                  FontSize="12"
-                  VerticalAlignment="Center"
-                  Text="Windows Event Viewer entries related to monitored services" />
-              <StackPanel Grid.Column="1"
-                          Orientation="Horizontal">
-                <Button x:Name="btnRefreshEvents"
-                        Content="↻ Refresh Events"
-                        Style="{StaticResource BtnBase}"
-                        Margin="0,0,6,0"/>
-                <Button x:Name="btnClearEvents"
-                        Content="🗑 Clear View"
-                        Style="{StaticResource BtnBase}"/>
-              </StackPanel>
+          <TabItem Header="Events" Style="{StaticResource SubTabItem}">
+            <Grid Background="#1E1E2E">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+              </Grid.RowDefinitions>
+              <Border Grid.Row="0" Background="#181825" Padding="16,9">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Foreground="#6C7086" FontSize="12"
+                             VerticalAlignment="Center"
+                             Text="Windows Event Viewer entries related to monitored services"/>
+                  <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button x:Name="btnRefreshEvents" Content="↻ Refresh Events"
+                            Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
+                    <Button x:Name="btnClearEvents" Content="Clear View"
+                            Style="{StaticResource BtnBase}"/>
+                  </StackPanel>
+                </Grid>
+              </Border>
+              <DataGrid x:Name="EventsGrid" Grid.Row="1" Margin="12,8,12,8"
+                        ItemsSource="{Binding}">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="155"/>
+                  <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="90"/>
+                  <DataGridTextColumn Header="Event ID" Binding="{Binding EventId}" Width="90"/>
+                  <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="170"/>
+                  <DataGridTextColumn Header="Service" Binding="{Binding Service}" Width="160"/>
+                  <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
+                </DataGrid.Columns>
+              </DataGrid>
             </Grid>
-          </Border>
-          <!-- Event Grid -->
-          <DataGrid
-              x:Name="EventsGrid"
-              Grid.Row="1"
-              Margin="12,8,12,8"
-              ItemsSource="{Binding}">
-            <DataGrid.Columns>
-              <DataGridTextColumn
-                  Header="Time"
-                  Binding="{Binding Time}"
-                  Width="155" />
-              <DataGridTextColumn
-                  Header="Level"
-                  Binding="{Binding Level}"
-                  Width="90" />
-              <DataGridTextColumn
-                  Header="Event ID"
-                  Binding="{Binding EventId}"
-                  Width="90" />
-              <DataGridTextColumn
-                  Header="Source"
-                  Binding="{Binding Source}"
-                  Width="170" />
-              <DataGridTextColumn
-                  Header="Service"
-                  Binding="{Binding Service}"
-                  Width="160" />
-              <DataGridTextColumn
-                  Header="Message"
-                  Binding="{Binding Message}"
-                  Width="*" />
-            </DataGrid.Columns>
-          </DataGrid>
-        </Grid>
-      </TabItem>
+          </TabItem>
           <TabItem Header="Summary" Style="{StaticResource SubTabItem}">
             <ScrollViewer Background="#1E1E2E" VerticalScrollBarVisibility="Auto">
               <StackPanel Margin="20,16,20,20">
@@ -900,7 +847,7 @@ function Save-Config {
             <Border Grid.Row="2" Background="#181825" Padding="16,8" Margin="0,8,0,0">
               <WrapPanel VerticalAlignment="Center">
                 <TextBlock Text="Search:" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox x:Name="txtRdSearch" Width="240" Margin="0,0,16,0" ToolTip="Game name, description, Game Id, Swiper Id, Reader Id or IP"/>
+                <TextBox x:Name="txtRdSearch" Width="240" Margin="0,0,16,0" ToolTip="Description, Game Id, Reader Id or IP"/>
                 <TextBlock Text="Type:" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <Button x:Name="btnRdAll" Content="All" Style="{StaticResource BtnPurple}" Margin="0,0,4,0"/>
                 <Button x:Name="btnRdSts" Content="STS" Style="{StaticResource BtnBase}"   Margin="0,0,4,0"/>
@@ -912,21 +859,121 @@ function Save-Config {
             <DataGrid x:Name="dgReaders" Grid.Row="3" Margin="12,8,12,8" CanUserSortColumns="True">
               <DataGrid.Columns>
                 <DataGridTextColumn Header="Type"         Binding="{Binding Type}"        Width="60"/>
-                <DataGridTextColumn Header="Game name"    Binding="{Binding GameName}"    Width="*"/>
                 <DataGridTextColumn Header="Description"  Binding="{Binding Description}" Width="*"/>
-                <DataGridTextColumn Header="Game Id"      Binding="{Binding GameId}"      Width="150"/>
-                <DataGridTextColumn Header="Swiper"       Binding="{Binding SwiperId}"    Width="65"/>
-                <DataGridTextColumn Header="Reader Id"    Binding="{Binding ReaderId}"    Width="110"/>
-                <DataGridTextColumn Header="IP address"   Binding="{Binding Ip}"          Width="110"/>
-                <DataGridTextColumn Header="Poll grp"     Binding="{Binding PollGroup}"   Width="65"/>
-                <DataGridTextColumn Header="Paused"       Binding="{Binding Paused}"      Width="60"/>
-                <DataGridTextColumn Header="Status"       Binding="{Binding Status}"      Width="60"/>
-                <DataGridTextColumn Header="Last comms"   Binding="{Binding LastComms}"   Width="125"/>
-                <DataGridTextColumn Header="Media ver."   Binding="{Binding MediaVer}"    Width="90"/>
+                <DataGridTextColumn Header="Game Id"      Binding="{Binding GameId}"      Width="170"/>
+                <DataGridTextColumn Header="Reader Id"    Binding="{Binding ReaderId}"    Width="120"/>
+                <DataGridTextColumn Header="IP address"   Binding="{Binding Ip}"          Width="120"/>
+                <DataGridTextColumn Header="Paused"       Binding="{Binding Paused}"      Width="65"/>
+                <DataGridTextColumn Header="Online"       Binding="{Binding Online}"      Width="85">
+                  <DataGridTextColumn.ElementStyle>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Foreground" Value="#6C7086"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Online}" Value="Online"><Setter Property="Foreground" Value="#A6E3A1"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Online}" Value="No reply"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="Last comms"   Binding="{Binding LastComms}"   Width="135"/>
               </DataGrid.Columns>
             </DataGrid>
           </Grid>
         </TabItem>
+      <!-- Access Points -->
+      <TabItem Header="  Access Points  " x:Name="tabAps">
+        <Grid Background="#1E1E2E">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Background="#181825" Padding="16,9">
+            <Grid>
+              <TextBlock x:Name="txtApStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,420,0"
+                         Text="Pings the access point range to show which APs are live."/>
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btnApUnifi"  Content="🌐  Open UniFi"  Style="{StaticResource BtnPurple}" Margin="0,0,6,0" ToolTip="Starts the UniFi app on this server if needed, then opens the UniFi dashboard in your browser"/>
+                <Button x:Name="btnApScan"   Content="Rescan Range"   Style="{StaticResource BtnBlue}"   Margin="0,0,6,0" ToolTip="Ping every address in the range to find APs"/>
+                <Button x:Name="btnApPing"   Content="↻  Ping Now"    Style="{StaticResource BtnBase}"   Margin="0,0,6,0" ToolTip="Ping the APs already found"/>
+                <Button x:Name="btnApCopy"   Content="Copy"           Style="{StaticResource BtnBase}"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <!-- Counts -->
+          <Grid Grid.Row="1" Margin="12,12,12,4">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition/><ColumnDefinition/><ColumnDefinition/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="#313244" CornerRadius="8" Padding="14,10" Margin="0,0,8,0">
+              <StackPanel>
+                <TextBlock Text="ACCESS POINTS" Foreground="#6C7086" FontSize="10" FontWeight="SemiBold"/>
+                <TextBlock x:Name="txtApTotal" Text="—" Foreground="#CBA6F7" FontSize="28" FontWeight="Bold"/>
+                <TextBlock x:Name="txtApRange" Foreground="#6C7086" FontSize="10"/>
+              </StackPanel>
+            </Border>
+            <Border Grid.Column="1" Background="#313244" CornerRadius="8" Padding="14,10" Margin="0,0,8,0">
+              <StackPanel>
+                <TextBlock Text="ONLINE" Foreground="#6C7086" FontSize="10" FontWeight="SemiBold"/>
+                <TextBlock x:Name="txtApOnline" Text="—" Foreground="#A6E3A1" FontSize="28" FontWeight="Bold"/>
+                <TextBlock Text="answering ping" Foreground="#6C7086" FontSize="10"/>
+              </StackPanel>
+            </Border>
+            <Border Grid.Column="2" Background="#313244" CornerRadius="8" Padding="14,10">
+              <StackPanel>
+                <TextBlock Text="OFFLINE" Foreground="#6C7086" FontSize="10" FontWeight="SemiBold"/>
+                <TextBlock x:Name="txtApOffline" Text="—" Foreground="#F38BA8" FontSize="28" FontWeight="Bold"/>
+                <TextBlock Text="found before, not answering now" Foreground="#6C7086" FontSize="10"/>
+              </StackPanel>
+            </Border>
+          </Grid>
+          <!-- Settings row -->
+          <Border Grid.Row="2" Background="#181825" Padding="16,8" Margin="0,8,0,0">
+            <WrapPanel VerticalAlignment="Center">
+              <TextBlock Text="Range" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,6,4"/>
+              <TextBox x:Name="txtApFrom" Width="105" Margin="0,0,4,4"/>
+              <TextBlock Text="to" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,4,4"/>
+              <TextBox x:Name="txtApTo" Width="105" Margin="0,0,16,4"/>
+              <TextBlock Text="Ping every" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,6,4"/>
+              <TextBox x:Name="txtApEvery" Width="50" Margin="0,0,4,4" ToolTip="Seconds between pings of the known APs (15 to 3600)"/>
+              <TextBlock Text="sec" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,16,4"/>
+              <TextBlock Text="UniFi address" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,6,4"/>
+              <TextBox x:Name="txtApUrl" Width="230" Margin="0,0,8,4" ToolTip="The page Open UniFi launches, e.g. https://unifi.ui.com or https://192.168.1.1"/>
+              <Button x:Name="btnApSave" Content="Save" Style="{StaticResource BtnPurple}" Margin="0,0,0,4"/>
+            </WrapPanel>
+          </Border>
+          <DataGrid x:Name="dgAps" Grid.Row="3" Margin="12,8,12,8" CanUserSortColumns="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="95">
+                <DataGridTextColumn.ElementStyle>
+                  <Style TargetType="TextBlock">
+                    <Setter Property="Foreground" Value="#CDD6F4"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding Status}" Value="Online"><Setter Property="Foreground" Value="#A6E3A1"/></DataTrigger>
+                      <DataTrigger Binding="{Binding Status}" Value="Offline"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </DataGridTextColumn.ElementStyle>
+              </DataGridTextColumn>
+              <DataGridTextColumn Header="IP address" Binding="{Binding Ip}"       Width="120" SortMemberPath="SortKey"/>
+              <DataGridTextColumn Header="Name"       Binding="{Binding Name}"     Width="*"/>
+              <DataGridTextColumn Header="Ping"       Binding="{Binding Ms}"       Width="75"/>
+              <DataGridTextColumn Header="Last seen"  Binding="{Binding LastSeen}" Width="140"/>
+              <DataGridTextColumn Header="Since"      Binding="{Binding Since}"    Width="140"/>
+            </DataGrid.Columns>
+          </DataGrid>
+          <Border Grid.Row="4" Background="#181825" Padding="16,9">
+            <StackPanel Orientation="Horizontal">
+              <Button x:Name="btnApPingWin" Content="📶  Continuous Ping" Style="{StaticResource BtnBlue}" Margin="0,0,6,0"/>
+              <Button x:Name="btnApForget"  Content="✕  Forget"          Style="{StaticResource BtnRed}"/>
+              <TextBlock Text="Select an AP first. Forget removes an AP that was taken out, so it stops showing as offline."
+                         Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+        </Grid>
+      </TabItem>
       <!-- Devices -->
       <TabItem Header="  Devices  ">
         <Grid Background="#1E1E2E">
@@ -959,7 +1006,28 @@ function Save-Config {
               </StackPanel>
             </Grid>
           </Border>
-          <DataGrid x:Name="dgDevices" Grid.Row="1" Margin="12,8,12,8">
+          <DataGrid x:Name="dgDevices" Grid.Row="1" Margin="12,8,12,8" RowDetailsVisibilityMode="VisibleWhenSelected">
+            <DataGrid.RowDetailsTemplate>
+              <DataTemplate>
+                <Border Background="#181825" BorderBrush="#CBA6F7" BorderThickness="2,0,0,0" Padding="14,10" Margin="0,0,0,4">
+                  <StackPanel>
+                    <WrapPanel>
+                      <Button Tag="Connect"  Content="🖥  Connect (RDP)" Style="{StaticResource BtnGreen}"  Margin="0,0,6,4"
+                              ToolTip="Joins the signed-in user's screen without signing them out. Opens a normal session when nobody is signed in."/>
+                      <Button Tag="Ping"     Content="📶  Ping"          Style="{StaticResource BtnBlue}"   Margin="0,0,6,4"/>
+                      <Button Tag="Services" Content="⚙  Services"       Style="{StaticResource BtnPurple}" Margin="0,0,6,4"/>
+                      <Button Tag="RemoteAdmin" Content="🛠  Admin Tasks (HTTPS)" Style="{StaticResource BtnPurple}" Margin="0,0,6,4"
+                              ToolTip="Run fixed, approved RDP and service tasks over WinRM. Choose HTTP with an exact TrustedHosts entry or HTTPS with a trusted matching certificate."/>
+                      <Button Tag="Software" Content="⬇  Software"       Style="{StaticResource BtnPurple}" Margin="0,0,20,4"/>
+                      <Button Tag="Remove"   Content="✕  Remove"         Style="{StaticResource BtnRed}"    Margin="0,0,0,4"/>
+                    </WrapPanel>
+                    <TextBlock Foreground="#6C7086" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap">
+                      <Run Text="{Binding Name, Mode=OneWay}"/><Run Text="  ·  IP "/><Run Text="{Binding CurrentIP, Mode=OneWay}"/><Run Text="  ·  last known "/><Run Text="{Binding LastKnownIP, Mode=OneWay}"/><Run Text="  ·  click the row again to close"/>
+                    </TextBlock>
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </DataGrid.RowDetailsTemplate>
             <DataGrid.Columns>
               <DataGridTextColumn Header="Device"        Binding="{Binding Name}"        Width="150"/>
               <DataGridTextColumn Header="Status"        Binding="{Binding Status}"      Width="130">
@@ -982,17 +1050,6 @@ function Save-Config {
               <DataGridTextColumn Header="Details"       Binding="{Binding Detail}"      Width="*"/>
             </DataGrid.Columns>
           </DataGrid>
-          <Border Grid.Row="2" Background="#181825" Padding="16,9">
-            <StackPanel Orientation="Horizontal">
-              <Button x:Name="btnDevConnect"  Content="Connect (RDP)" Style="{StaticResource BtnGreen}"  Margin="0,0,6,0"/>
-              <Button x:Name="btnDevPing"     Content="Ping"          Style="{StaticResource BtnBlue}"   Margin="0,0,6,0"/>
-              <Button x:Name="btnDevServices" Content="Services..."   Style="{StaticResource BtnPurple}" Margin="0,0,6,0"/>
-              <Button x:Name="btnDevSoftware" Content="Software..."   Style="{StaticResource BtnPurple}" Margin="0,0,6,0"/>
-              <Button x:Name="btnDevRemove"   Content="Remove"        Style="{StaticResource BtnRed}"/>
-              <TextBlock Text="Select a device in the list first" Foreground="#6C7086" FontSize="12"
-                         VerticalAlignment="Center" Margin="14,0,0,0"/>
-            </StackPanel>
-          </Border>
           <!-- Remote services panel (covers the Devices list while open) -->
           <Grid x:Name="pnlRemote" Grid.RowSpan="3" Background="#1E1E2E" Visibility="Collapsed">
             <Grid.RowDefinitions>
@@ -1014,7 +1071,7 @@ function Save-Config {
             </Border>
             <DataGrid x:Name="dgRemote" Grid.Row="1" Margin="12,8,12,8">
               <DataGrid.Columns>
-                <DataGridTextColumn Header="Service" Binding="{Binding Display}"   Width="*"/>
+                <DataGridTextColumn Header="Service / Process" Binding="{Binding Display}" Width="*"/>
                 <DataGridTextColumn Header="Name"    Binding="{Binding Name}"      Width="160"/>
                 <DataGridTextColumn Header="Status"  Binding="{Binding Status}"    Width="110">
                   <DataGridTextColumn.ElementStyle>
@@ -1023,12 +1080,14 @@ function Save-Config {
                       <Style.Triggers>
                         <DataTrigger Binding="{Binding Status}" Value="Running"><Setter Property="Foreground" Value="#A6E3A1"/></DataTrigger>
                         <DataTrigger Binding="{Binding Status}" Value="Stopped"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Status}" Value="Not running"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
                         <DataTrigger Binding="{Binding Status}" Value="Error"><Setter Property="Foreground" Value="#FAB387"/></DataTrigger>
                       </Style.Triggers>
                     </Style>
                   </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
                 <DataGridTextColumn Header="Startup" Binding="{Binding StartType}" Width="100"/>
+                <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="250"/>
               </DataGrid.Columns>
             </DataGrid>
             <Border Grid.Row="2" Background="#181825" Padding="16,9">
@@ -1036,9 +1095,61 @@ function Save-Config {
                 <Button x:Name="btnRemStart"   Content="▶  Start"   Style="{StaticResource BtnGreen}"  Margin="0,0,6,0"/>
                 <Button x:Name="btnRemStop"    Content="■  Stop"    Style="{StaticResource BtnRed}"    Margin="0,0,6,0"/>
                 <Button x:Name="btnRemRestart" Content="↺  Restart" Style="{StaticResource BtnYellow}" Margin="0,0,6,0"/>
-                <Button x:Name="btnRemStack"   Content="↺  Restart EMBED Stack" Style="{StaticResource BtnPurple}"/>
+                <Button x:Name="btnRemStack"   Content="↺  Restart EMBED Stack" Style="{StaticResource BtnPurple}" Visibility="Collapsed"/>
                 <TextBlock Text="Start / Stop / Restart act on the selected row" Foreground="#6C7086" FontSize="12"
                            VerticalAlignment="Center" Margin="14,0,0,0"/>
+              </StackPanel>
+            </Border>
+          </Grid>
+          <!-- Fixed remote-admin tasks; this is intentionally not an arbitrary command interface. -->
+          <Grid x:Name="pnlRemoteAdmin" Grid.RowSpan="3" Background="#1E1E2E" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Background="#181825" Padding="16,9">
+              <StackPanel>
+                <WrapPanel VerticalAlignment="Center">
+                  <TextBlock Text="Computer:" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                  <TextBox x:Name="txtAdminHost" Width="170" Margin="0,0,8,0"
+                           ToolTip="For HTTP, use the exact host/IP listed in this PC's TrustedHosts. For HTTPS, use a hostname covered by the trusted target certificate."/>
+                  <ComboBox x:Name="cmbAdminTransport" Width="150" SelectedIndex="0" Margin="0,0,8,0"
+                            ToolTip="HTTP requires an exact TrustedHosts entry; HTTPS requires a trusted matching certificate; WMI/DCOM requires RPC firewall access.">
+                    <ComboBoxItem Content="HTTP (TrustedHosts)"/>
+                    <ComboBoxItem Content="HTTPS (TLS)"/>
+                    <ComboBoxItem Content="WMI / DCOM"/>
+                  </ComboBox>
+                  <Button x:Name="btnAdminCheck" Content="Check Connection / RDP" Style="{StaticResource BtnBlue}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnAdminEnableRdp" Content="Enable RDP" Style="{StaticResource BtnGreen}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnAdminEnableWinRm" Content="Enable WinRM (WMI)" Style="{StaticResource BtnGreen}" Margin="0,0,6,0"
+                          ToolTip="Uses WMI/DCOM to run the fixed WinRM quickconfig task on the target. Select WMI / DCOM first."/>
+                  <Button x:Name="btnAdminLoadServices" Content="Check Services" Style="{StaticResource BtnPurple}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnAdminClose" Content="Close" Style="{StaticResource BtnBase}"/>
+                </WrapPanel>
+                <TextBlock Text="HTTP requires the exact target in this PC's TrustedHosts; HTTPS requires a trusted matching certificate; WMI/DCOM needs TCP 135 plus dynamic RPC firewall access. Use Enable WinRM (WMI) to configure the target's HTTP listener and firewall rule. Credentials are requested each time and never saved."
+                           Foreground="#F9E2AF" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Border>
+            <TextBlock Grid.Row="1" x:Name="txtAdminStatus" Foreground="#6C7086" FontSize="12"
+                       TextWrapping="Wrap" Margin="16,8,16,0"
+                       Text="Check the selected transport and RDP status before running a task."/>
+            <DataGrid x:Name="dgAdminServices" Grid.Row="2" Margin="12,8,12,8">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Service / Process" Binding="{Binding Display}" Width="*"/>
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="160"/>
+                <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="110"/>
+                <DataGridTextColumn Header="Startup" Binding="{Binding StartType}" Width="100"/>
+                <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="250"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <Border Grid.Row="3" Background="#181825" Padding="16,9">
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="btnAdminStartService" Content="▶  Start Selected Service" Style="{StaticResource BtnGreen}" Margin="0,0,6,0"/>
+                <Button x:Name="btnAdminRestartService" Content="↺  Restart Selected Service" Style="{StaticResource BtnYellow}" Margin="0,0,6,0"/>
+                <TextBlock Text="Only Print Spooler, TeamViewer, and AnyDesk services can be controlled. AnyDesk.exe is check-only."
+                           Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap"/>
               </StackPanel>
             </Border>
           </Grid>
@@ -1386,13 +1497,13 @@ $btnStopAll       = Get-Ctrl 'btnStopAll'
 $btnRestartAll    = Get-Ctrl 'btnRestartAll'
 $ServicePanel     = Get-Ctrl 'ServicePanel'
 $HistoryGrid      = Get-Ctrl 'HistoryGrid'
+$EventsGrid       = Get-Ctrl 'EventsGrid'
+$btnRefreshEvents = Get-Ctrl 'btnRefreshEvents'
+$btnClearEvents   = Get-Ctrl 'btnClearEvents'
 $statRunning      = Get-Ctrl 'statRunning'
 $statStopped      = Get-Ctrl 'statStopped'
 $statOther        = Get-Ctrl 'statOther'
 $statEvents       = Get-Ctrl 'statEvents'
-$EventsGrid       = Get-Ctrl 'EventsGrid'
-$btnRefreshEvents = Get-Ctrl 'btnRefreshEvents'
-$btnClearEvents   = Get-Ctrl 'btnClearEvents'
 $statLastScan     = Get-Ctrl 'statLastScan'
 $GroupHealthPanel = Get-Ctrl 'GroupHealthPanel'
 $statusBar        = Get-Ctrl 'statusBar'
@@ -1418,9 +1529,10 @@ $btnDevAdd        = Get-Ctrl 'btnDevAdd'
 $btnDevCheck      = Get-Ctrl 'btnDevCheck'
 $txtDevStatus     = Get-Ctrl 'txtDevStatus'
 $dgDevices        = Get-Ctrl 'dgDevices'
-$btnDevConnect    = Get-Ctrl 'btnDevConnect'
-$btnDevPing       = Get-Ctrl 'btnDevPing'
-$btnDevRemove     = Get-Ctrl 'btnDevRemove'
+$btnDevConnect    = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
+$btnDevPing       = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
+$btnDevRemove     = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
+$btnDevRemoteAdmin = New-Object System.Windows.Controls.Button  # not on screen - triggered from the expanded device row
 $btnDevDiscover   = Get-Ctrl 'btnDevDiscover'
 $pnlDiscover      = Get-Ctrl 'pnlDiscover'
 $btnDscScan       = Get-Ctrl 'btnDscScan'
@@ -1446,7 +1558,7 @@ $btnUpdCheck      = Get-Ctrl 'btnUpdCheck'
 $btnUpdInstall    = Get-Ctrl 'btnUpdInstall'
 $txtUpdStatus     = Get-Ctrl 'txtUpdStatus'
 $btnSnapshot      = Get-Ctrl 'btnSnapshot'
-$btnDevServices   = Get-Ctrl 'btnDevServices'
+$btnDevServices   = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
 $pnlRemote        = Get-Ctrl 'pnlRemote'
 $txtRemHost       = Get-Ctrl 'txtRemHost'
 $btnRemLoad       = Get-Ctrl 'btnRemLoad'
@@ -1457,6 +1569,18 @@ $btnRemStart      = Get-Ctrl 'btnRemStart'
 $btnRemStop       = Get-Ctrl 'btnRemStop'
 $btnRemRestart    = Get-Ctrl 'btnRemRestart'
 $btnRemStack      = Get-Ctrl 'btnRemStack'
+$pnlRemoteAdmin   = Get-Ctrl 'pnlRemoteAdmin'
+$txtAdminHost     = Get-Ctrl 'txtAdminHost'
+$cmbAdminTransport = Get-Ctrl 'cmbAdminTransport'
+$txtAdminStatus   = Get-Ctrl 'txtAdminStatus'
+$btnAdminCheck    = Get-Ctrl 'btnAdminCheck'
+$btnAdminEnableRdp = Get-Ctrl 'btnAdminEnableRdp'
+$btnAdminEnableWinRm = Get-Ctrl 'btnAdminEnableWinRm'
+$btnAdminLoadServices = Get-Ctrl 'btnAdminLoadServices'
+$btnAdminClose    = Get-Ctrl 'btnAdminClose'
+$dgAdminServices  = Get-Ctrl 'dgAdminServices'
+$btnAdminStartService = Get-Ctrl 'btnAdminStartService'
+$btnAdminRestartService = Get-Ctrl 'btnAdminRestartService'
 $txtSnapKeep      = Get-Ctrl 'txtSnapKeep'
 $txtSnapDays      = Get-Ctrl 'txtSnapDays'
 $txtSqlServer     = Get-Ctrl 'txtSqlServer'
@@ -1482,7 +1606,7 @@ $btnPkgAdd        = Get-Ctrl 'btnPkgAdd'
 $btnPkgScan       = Get-Ctrl 'btnPkgScan'
 $txtSwRoot        = Get-Ctrl 'txtSwRoot'
 $btnSwRootSave    = Get-Ctrl 'btnSwRootSave'
-$btnDevSoftware   = Get-Ctrl 'btnDevSoftware'
+$btnDevSoftware   = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
 $txtDbVer         = Get-Ctrl 'txtDbVer'
 $MainTabs         = Get-Ctrl 'MainTabs'
 $tabSql           = Get-Ctrl 'tabSql'
@@ -1535,7 +1659,27 @@ $btnRdStp         = Get-Ctrl 'btnRdStp'
 $chkRdRetired     = Get-Ctrl 'chkRdRetired'
 $txtRdCount       = Get-Ctrl 'txtRdCount'
 $dgReaders        = Get-Ctrl 'dgReaders'
+$tabAps           = Get-Ctrl 'tabAps'
+$txtApStatus      = Get-Ctrl 'txtApStatus'
+$btnApUnifi       = Get-Ctrl 'btnApUnifi'
+$btnApScan        = Get-Ctrl 'btnApScan'
+$btnApPing        = Get-Ctrl 'btnApPing'
+$btnApCopy        = Get-Ctrl 'btnApCopy'
+$txtApTotal       = Get-Ctrl 'txtApTotal'
+$txtApRange       = Get-Ctrl 'txtApRange'
+$txtApOnline      = Get-Ctrl 'txtApOnline'
+$txtApOffline     = Get-Ctrl 'txtApOffline'
+$txtApFrom        = Get-Ctrl 'txtApFrom'
+$txtApTo          = Get-Ctrl 'txtApTo'
+$txtApEvery       = Get-Ctrl 'txtApEvery'
+$txtApUrl         = Get-Ctrl 'txtApUrl'
+$btnApSave        = Get-Ctrl 'btnApSave'
+$dgAps            = Get-Ctrl 'dgAps'
+$btnApPingWin     = Get-Ctrl 'btnApPingWin'
+$btnApForget      = Get-Ctrl 'btnApForget'
+# ------------------------------------------------------------
 # COLOR HELPERS + STATUS/TRAY COLOR
+# ------------------------------------------------------------
 function ColorBrush([string]$hex) {
     [Windows.Media.SolidColorBrush][Windows.Media.ColorConverter]::ConvertFromString($hex)
 }
@@ -1592,94 +1736,9 @@ function Get-StatusBrush([string]$status) {
         default        { ColorBrush '#6C7086' }
     }
 }
-# EVENT LOG HELPERS
-function Get-ServiceFailureReason {
-    param(
-        [string]$ServiceName,
-        [int]$Minutes = 5
-    )
-    try {
-        $events = Get-WinEvent -FilterHashtable @{
-            LogName   = 'System'
-            StartTime = (Get-Date).AddMinutes(-$Minutes)
-        } -ErrorAction Stop |
-        Where-Object {
-            $_.Message -match [regex]::Escape($ServiceName)
-        } |
-        Select-Object -First 3
-        if ($events) {
-            return ($events | ForEach-Object {
-                "EventID $($_.Id): $($_.Message.Split([Environment]::NewLine)[0])"
-            }) -join '; '
-        }
-        return 'No related event found'
-    }
-    catch {
-        return $_.Exception.Message
-    }
-}
-function Get-ServiceEvents {
-    param(
-        [int]$Hours = 24,
-        [int]$MaxEvents = 200
-    )
-    try {
- $events = Get-WinEvent `
-    -FilterHashtable @{
-        LogName      = 'System'
-        ProviderName = 'Service Control Manager'
-        StartTime    = (Get-Date).AddHours(-$Hours)
-    } `
-    -ErrorAction Stop
-        $results = foreach ($event in $events) {
-            $matchedService = $null
-            foreach ($svc in $script:ServiceDefs) {
-                if (($event.Message -match [regex]::Escape($svc.Name)) -or
-                    ($svc.Display -and $event.Message -match [regex]::Escape($svc.Display))) {
-                    $matchedService = $svc.Display
-                    break
-                }
-            }
-            $isRelevantLevel = $event.LevelDisplayName -in @(
-                'Information'
-                'Warning'
-                'Error'
-                'Critical'
-            )
-            $isRelevantEvent = $event.Id -in @(
-                7031
-                7034
-                7040
-                7045
-            )
-            if ($matchedService -and ($isRelevantLevel -or $isRelevantEvent)) {
-[PSCustomObject]@{
-    Time        = $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
-    Level       = $event.LevelDisplayName
-    EventId     = $event.Id
-    Source      = $event.ProviderName
-    Service     = $matchedService
-    Message =
-        ($event.Message `
-            -replace "`r",' ' `
-            -replace "`n",' ')
-    FullMessage =
-        $event.Message
-}
-            }
-        }
-        return $results |
-            Sort-Object Time -Descending |
-            Select-Object -First $MaxEvents
-    }
-    catch {
-        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
-            return @()
-        }
-        throw
-    }
-}
+# ------------------------------------------------------------
 # SAFE SERVICE QUERY + CONTROL
+# ------------------------------------------------------------
 function Get-SafeServiceStatus([string]$Name) {
     try {
         $s = Get-Service -Name $Name -ErrorAction Stop
@@ -1730,12 +1789,12 @@ function Get-ServiceResourceMetrics {
         foreach ($process in $processes) {
             $processId = [int]$process.ProcessId
             $nextSamples[$processId] = [PSCustomObject]@{
-                Time             = $now
-                CpuTime100ns     = [double]$process.KernelModeTime + [double]$process.UserModeTime
+                Time               = $now
+                CpuTime100ns       = [double]$process.KernelModeTime + [double]$process.UserModeTime
                 ReadTransferCount  = [double]$process.ReadTransferCount
                 WriteTransferCount = [double]$process.WriteTransferCount
-                MemoryMB         = [Math]::Round(([double]$process.WorkingSetSize / 1MB), 1)
-                CreationDate      = [string]$process.CreationDate
+                MemoryMB           = [Math]::Round(([double]$process.WorkingSetSize / 1MB), 1)
+                CreationDate       = [string]$process.CreationDate
             }
         }
 
@@ -1777,8 +1836,7 @@ function Get-ServiceResourceMetrics {
             }
         }
         $script:PreviousProcessSamples = $nextSamples
-    }
-    catch {
+    } catch {
         $errorMessage = $_.Exception.Message
         foreach ($def in $script:ServiceDefs) {
             $metrics[$def.Name] = [PSCustomObject]@{
@@ -1814,7 +1872,13 @@ function Stop-ServiceSafe([string]$name) {
 }
 function Restart-ServiceSafe([string]$name) {
     try {
-        Restart-Service -Name $name -ErrorAction Stop
+        $svc = Get-Service -Name $name -ErrorAction Stop
+        if ($svc.StartType.ToString() -eq 'Disabled') {
+            return "Error: service is Disabled - change its Startup type to Manual/Automatic first"
+        }
+        if ($svc.Status -eq 'Running') { $script:ExpectedStops[$name] = $true }   # our own stop is not an outage
+        Restart-Service -Name $name -Force -ErrorAction Stop
+        $script:ExpectedStops.Remove($name)      # back up, so the next stop is a real outage
         return "Restarted"
     } catch {
         return "Error: $($_.Exception.Message)"
@@ -1831,8 +1895,8 @@ function Build-ServiceRows {
         $card.Padding      = New-Object Windows.Thickness(16, 12, 16, 12)
         $card.Tag          = $def.Group
         $grid = New-Object Windows.Controls.Grid
-        # Columns: Dot | Info | Resources | Status | Toggle
-        foreach ($w in @('Auto', '*', 'Auto', 'Auto', 'Auto')) {
+        # Columns: Dot | Info | Metrics | Status | Restart | Toggle
+        foreach ($w in @('Auto', '*', 'Auto', 'Auto', 'Auto', 'Auto')) {
             $cd = New-Object Windows.Controls.ColumnDefinition
             $cd.Width = if ($w -eq '*') {
                 New-Object Windows.GridLength(1, [Windows.GridUnitType]::Star)
@@ -1893,13 +1957,41 @@ function Build-ServiceRows {
         $statusTb.HorizontalAlignment = 'Right'
         $statusTb.Margin = New-Object Windows.Thickness(0,0,16,0)
         [Windows.Controls.Grid]::SetColumn($statusTb, 3)
+        # Restart button (this service only)
+        $btnRst = New-Object Windows.Controls.Button
+        $btnRst.Style     = $window.FindResource('BtnYellow')
+        $btnRst.Content   = [string][char]0x21BA + '  Restart'
+        $btnRst.Tag       = $def.Name
+        $btnRst.Margin    = New-Object Windows.Thickness(0,0,14,0)
+        $btnRst.VerticalAlignment = 'Center'
+        $btnRst.ToolTip   = "Restart $($def.Display) only"
+        $btnRst.IsEnabled = $script:IsAdmin
+        if ($def['MonitorOnly']) { $btnRst.Visibility = [System.Windows.Visibility]::Collapsed }
+        [Windows.Controls.Grid]::SetColumn($btnRst, 4)
+        $btnRst.Add_Click({
+            $n = [string]$this.Tag
+            $d = $script:ServiceRows[$n].Def
+            $statusBar.Text = "Restarting $($d.Display)..."
+            $window.Cursor  = [System.Windows.Input.Cursors]::Wait
+            $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+            try {
+                $res = Restart-ServiceSafe $n
+                Add-HistoryEntry -ServiceName $d.Display -Group $d.Group -OldStatus '' -NewStatus 'Restart' -Note $res
+                $script:ServiceCache[$n] = Get-SafeServiceStatus $n
+                Update-ServiceRow $n
+                Refresh-Summary
+                $statusBar.Text = "$($d.Display): $res"
+            } finally {
+                $window.Cursor = $null
+            }
+        })
         # Monitor on/off switch
         $chk = New-Object Windows.Controls.CheckBox
         $chk.Style     = $window.FindResource('SwitchToggle')
         $chk.Tag       = $def.Name
         $chk.IsChecked = -not $script:DisabledServices.ContainsKey($def.Name)
         $chk.ToolTip   = 'On = monitored and included in Start/Stop/Restart All'
-        [Windows.Controls.Grid]::SetColumn($chk, 4)
+        [Windows.Controls.Grid]::SetColumn($chk, 5)
         $chk.Add_Click({
             $n = [string]$this.Tag
             $d = $script:ServiceRows[$n].Def
@@ -1915,6 +2007,7 @@ function Build-ServiceRows {
         $grid.Children.Add($infoStack) | Out-Null
         $grid.Children.Add($metricsTb) | Out-Null
         $grid.Children.Add($statusTb)  | Out-Null
+        $grid.Children.Add($btnRst)    | Out-Null
         $grid.Children.Add($chk)       | Out-Null
         # Add card to panel
         $card.Child = $grid
@@ -1926,11 +2019,14 @@ function Build-ServiceRows {
             StatusTb = $statusTb
             NoteTb   = $svcTb
             Toggle   = $chk
+            Restart  = $btnRst
             Def      = $def
         }
     }
 }
-# HISTORY + SUMMARY + EVENTS
+# ------------------------------------------------------------
+# HISTORY + SUMMARY
+# ------------------------------------------------------------
 $HistoryGrid.ItemsSource = $script:HistoryList
 $EventsGrid.ItemsSource = $script:EventList
 function Add-HistoryEntry {
@@ -1958,6 +2054,59 @@ function Add-HistoryEntry {
         $entry | Export-Csv -Path $csv -Append -NoTypeInformation -Encoding UTF8
     } catch {}
 }
+function Get-ServiceEvents {
+    param([int]$Hours = 24, [int]$MaxEvents = 200)
+    try {
+        $events = Get-WinEvent -FilterHashtable @{
+            LogName      = 'System'
+            ProviderName = 'Service Control Manager'
+            StartTime    = (Get-Date).AddHours(-$Hours)
+        } -ErrorAction Stop
+        $results = foreach ($event in $events) {
+            $matchedService = $null
+            foreach ($service in $script:ServiceDefs) {
+                if (($event.Message -match [regex]::Escape($service.Name)) -or
+                    ($service.Display -and $event.Message -match [regex]::Escape($service.Display))) {
+                    $matchedService = $service.Display
+                    break
+                }
+            }
+            $relevantLevel = $event.LevelDisplayName -in @('Information', 'Warning', 'Error', 'Critical')
+            $relevantEvent = $event.Id -in @(7031, 7034, 7040, 7045)
+            if ($matchedService -and ($relevantLevel -or $relevantEvent)) {
+                [PSCustomObject]@{
+                    Time        = $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                    Level       = $event.LevelDisplayName
+                    EventId     = $event.Id
+                    Source      = $event.ProviderName
+                    Service     = $matchedService
+                    Message     = ($event.Message -replace "`r", ' ' -replace "`n", ' ')
+                    FullMessage = $event.Message
+                }
+            }
+        }
+        return $results | Sort-Object Time -Descending | Select-Object -First $MaxEvents
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') { return @() }
+        throw
+    }
+}
+function Refresh-EventsGrid {
+    $script:EventList.Clear()
+    foreach ($event in @(Get-ServiceEvents)) { $script:EventList.Add($event) }
+}
+$btnRefreshEvents.Add_Click({
+    try {
+        Refresh-EventsGrid
+        $statusBar.Text = 'Event list refreshed.'
+    } catch {
+        $statusBar.Text = "Could not refresh event list: $($_.Exception.Message)"
+    }
+})
+$btnClearEvents.Add_Click({
+    $script:EventList.Clear()
+    $statusBar.Text = 'Event view cleared.'
+})
 function Refresh-Summary {
     $running = 0
     $stopped = 0
@@ -2013,47 +2162,9 @@ function Refresh-Summary {
         $GroupHealthPanel.Items.Add($tb) | Out-Null
     }
 }
-function Add-HistoryEntry {
-    param(
-        [string]$ServiceName,
-        [string]$Group,
-        [string]$OldStatus,
-        [string]$NewStatus,
-        [string]$Note
-    )
-    $entry = [PSCustomObject]@{
-        Time        = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-        ServiceName = $ServiceName
-        Group       = $Group
-        OldStatus   = $OldStatus
-        NewStatus   = $NewStatus
-        Note        = $Note
-    }
-    $script:HistoryList.Insert(0, $entry)
-    $statEvents.Text = [string]$script:HistoryList.Count
-}
-function Refresh-EventsGrid {
-    $events = @(Get-ServiceEvents)
-    $script:EventList.Clear()
-    foreach ($event in $events) {
-        $script:EventList.Add($event)
-    }
-}
-$btnRefreshEvents.Add_Click({
-    try {
-        Refresh-EventsGrid
-        $statusBar.Text = "Event list refreshed."
-    }
-    catch {
-        $statusBar.Text = "Could not refresh event list: $($_.Exception.Message)"
-    }
-})
-$btnClearEvents.Add_Click({
-    $script:EventList.Clear()
-    $statusBar.Text =
-        "Event view cleared."
-})
+# ------------------------------------------------------------
 # EMAIL ALERTS (SMTP)
+# ------------------------------------------------------------
 function Get-SmtpSecurePassword {
     $enc = [string]$script:SmtpConfig['PasswordEnc']
     if (-not $enc) { return $null }
@@ -2314,15 +2425,93 @@ $btnDevCheck.Add_Click({
     if ($script:Devices.Count -eq 0) { $txtDevStatus.Text = 'Add a device first.'; return }
     if (-not (Start-DeviceScan)) { $txtDevStatus.Text = 'A check is already running...' }
 })
+# Connect (RDP): find the signed-in Windows session on the device (WMI over DCOM, needs admin on the device),
+# then join that session with Remote Desktop shadowing so the user is NOT signed out or locked.
+# Nobody signed in -> normal Remote Desktop session. Lookup failed -> ask before a normal session.
+$script:RdpJob = $null
+$script:RdpScript = {
+    param($target)
+    Add-Type -AssemblyName System.Management
+    $o = [ordered]@{ Ok = $false; Error = ''; Target = $target; Sessions = @() }
+    try {
+        $reach = $false
+        $tc = New-Object System.Net.Sockets.TcpClient
+        try { $t = $tc.ConnectAsync($target, 135); if ($t.Wait(2500) -and $tc.Connected) { $reach = $true } } catch {} finally { $tc.Close() }
+        if (-not $reach) { throw 'No answer on port 135 (remote management)' }
+        $co = New-Object System.Management.ConnectionOptions
+        $co.Impersonation    = [System.Management.ImpersonationLevel]::Impersonate
+        $co.EnablePrivileges = $true
+        $co.Timeout          = [TimeSpan]::FromSeconds(15)
+        $scope = New-Object System.Management.ManagementScope("\\$target\root\cimv2", $co)
+        $scope.Connect()
+        $eo = New-Object System.Management.EnumerationOptions
+        $eo.Timeout = [TimeSpan]::FromSeconds(15)
+        $q  = New-Object System.Management.ObjectQuery("SELECT * FROM Win32_Process WHERE Name = 'explorer.exe'")
+        $seen = @{}
+        foreach ($p in (New-Object System.Management.ManagementObjectSearcher($scope, $q, $eo)).Get()) {
+            $sid = [int]$p['SessionId']
+            if ($sid -le 0 -or $seen.ContainsKey($sid)) { continue }
+            $seen[$sid] = $true
+            $user = ''
+            try { $w = $p.InvokeMethod('GetOwner', $null, $null); if ($w['User']) { $user = "$($w['Domain'])\$($w['User'])" } } catch {}
+            $o.Sessions += [PSCustomObject]@{ Id = $sid; User = $user }
+        }
+        $o.Ok = $true
+    } catch {
+        $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+        $o.Error = $e.Message
+    }
+    [PSCustomObject]$o
+}
 $btnDevConnect.Add_Click({
     $dev = $dgDevices.SelectedItem
     if (-not $dev) { $txtDevStatus.Text = 'Select a device first.'; return }
+    if ($script:RdpJob) { $txtDevStatus.Text = 'Still checking the last device...'; return }
     if ($dev.Status -eq 'Offline' -or $dev.Status -eq 'Unresolved') {
         $ans = [System.Windows.MessageBox]::Show("$($dev.Name) looks offline. Try connecting anyway?", 'Remote Desktop', 'YesNo', 'Question')
         if ($ans -ne 'Yes') { return }
     }
-    Start-Process -FilePath 'mstsc.exe' -ArgumentList "/v:$(Get-DeviceTarget $dev)"
+    $target = Get-DeviceTarget $dev
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:RdpScript.ToString()).AddArgument([string]$target)
+        $script:RdpJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Name = [string]$dev.Name }
+        $txtDevStatus.Text = "Checking who is signed in on $($dev.Name)..."
+    } catch {
+        $script:RdpJob = $null
+        $txtDevStatus.Text = "Could not start: $($_.Exception.Message)"
+    }
 })
+function Complete-RdpConnect {
+    $job = $script:RdpJob
+    $script:RdpJob = $null
+    $r = $null
+    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch   { $r = [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message; Target = ''; Sessions = @() } }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $r -or -not $r.Target) { $txtDevStatus.Text = "Remote Desktop: the check returned nothing for $($job.Name)."; return }
+    $t = [string]$r.Target
+    if (-not $r.Ok) {
+        $ans = [System.Windows.MessageBox]::Show(
+            "Could not see who is signed in on $($job.Name):`r`n$($r.Error)`r`n`r`nOpen a normal Remote Desktop session instead?`r`nThis can sign out or lock the person using that PC.",
+            'Remote Desktop', 'YesNo', 'Warning')
+        if ($ans -eq 'Yes') { Start-Process -FilePath 'mstsc.exe' -ArgumentList "/v:$t"; $txtDevStatus.Text = "Normal Remote Desktop opened to $($job.Name)." }
+        else { $txtDevStatus.Text = "Remote Desktop cancelled for $($job.Name)." }
+        return
+    }
+    $sessions = @($r.Sessions | Sort-Object Id)
+    if ($sessions.Count -eq 0) {
+        Start-Process -FilePath 'mstsc.exe' -ArgumentList "/v:$t"
+        $txtDevStatus.Text = "Nobody is signed in on $($job.Name) - opened a normal Remote Desktop session."
+        return
+    }
+    $s = $sessions[0]
+    Start-Process -FilePath 'mstsc.exe' -ArgumentList "/v:$t /shadow:$($s.Id) /control"
+    $who  = if ($s.User) { $s.User } else { "session $($s.Id)" }
+    $more = if ($sessions.Count -gt 1) { " ($($sessions.Count) people signed in - joined the first)" } else { '' }
+    $txtDevStatus.Text = "Joining $who on $($job.Name) without signing them out. They may be asked to allow it.$more"
+}
 $btnDevPing.Add_Click({
     $dev = $dgDevices.SelectedItem
     if (-not $dev) { $txtDevStatus.Text = 'Select a device first.'; return }
@@ -2583,7 +2772,7 @@ function Complete-DiscoverScan {
         }
     }
 }
-$btnDevDiscover.Add_Click({ $pnlRemote.Visibility = 'Collapsed'; $pnlDiscover.Visibility = 'Visible'; Update-DiscoverList })
+$btnDevDiscover.Add_Click({ $pnlRemote.Visibility = 'Collapsed'; $pnlRemoteAdmin.Visibility = 'Collapsed'; $pnlDiscover.Visibility = 'Visible'; Update-DiscoverList })
 $btnDscClose.Add_Click({ $pnlDiscover.Visibility = 'Collapsed' })
 $btnDscScan.Add_Click({ Start-DiscoverScan })
 $chkDscRdp.Add_Click({ Update-DiscoverList })
@@ -2652,9 +2841,11 @@ function Update-ServiceRow {
         $row.NoteTb.Text      = "{0}  |  Not installed on this machine - switched off automatically" -f $def.Name
         $row.Dot.Fill         = ColorBrush '#6C7086'
         $row.Card.Opacity     = 0.5
+        $row.Restart.IsEnabled = $false
         $script:PreviousStates.Remove($def.Name)
         return
     }
+    $row.Restart.IsEnabled = $script:IsAdmin
 
     # Service reappeared: give the toggle back (respecting any manual off)
     if ($wasAuto) {
@@ -2786,6 +2977,34 @@ if ($swp -and $swp.Value) {
         }
     }
 }
+function New-ApObject([string]$Ip, [string]$Name, [string]$LastSeen) {
+    $parts = $Ip.Split('.')
+    $key = ''; if ($parts.Count -eq 4) { $key = '{0:D3}{1:D3}{2:D3}{3:D3}' -f [int]$parts[0], [int]$parts[1], [int]$parts[2], [int]$parts[3] }
+    [PSCustomObject]@{ Status = 'Not checked'; Ip = $Ip; Name = $Name; Ms = ''; LastSeen = $LastSeen; Since = ''; SortKey = $key }
+}
+$apc = $config.PSObject.Properties['AccessPoints']
+if ($apc -and $apc.Value) {
+    $av = $apc.Value
+    foreach ($k in 'RangeStart', 'RangeEnd', 'UnifiUrl') {
+        $p = $av.PSObject.Properties[$k]
+        if ($p -and $null -ne $p.Value) { $script:ApConfig[$k] = [string]$p.Value }
+    }
+    # v2.20: the old default (UniFi cloud sign-in page) moves to the local UniFi app
+    if (([string]$script:ApConfig['UnifiUrl']).TrimEnd('/') -eq 'https://unifi.ui.com') { $script:ApConfig['UnifiUrl'] = 'https://localhost:8443' }
+    $p = $av.PSObject.Properties['PingSecs']
+    if ($p -and $p.Value) { $v = [int]$p.Value; if ($v -ge 15 -and $v -le 3600) { $script:ApConfig['PingSecs'] = $v } }
+    $p = $av.PSObject.Properties['Known']
+    if ($p -and $p.Value) {
+        foreach ($x in @($p.Value)) {
+            $ip = [string]$x.Ip
+            if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { continue }
+            $nm = ''; if ($x.PSObject.Properties['Name'] -and $x.Name) { $nm = [string]$x.Name }
+            $ls = ''; if ($x.PSObject.Properties['LastSeen'] -and $x.LastSeen) { $ls = [string]$x.LastSeen }
+            $script:ApList.Add((New-ApObject $ip $nm $ls))
+        }
+    }
+}
+$script:ApCountdown = [int]$script:ApConfig['PingSecs']
 $ds = $config.PSObject.Properties['DeviceSeconds']
 if ($ds -and $ds.Value) { $v = [int]$ds.Value; if ($v -ge 30 -and $v -le 3600) { $script:DeviceSecs = $v } }
 $script:DeviceCountdown = $script:DeviceSecs
@@ -2811,7 +3030,7 @@ $btnRestartAll.IsEnabled = $script:IsAdmin
 $script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:TrayIcon.Icon    = [System.Drawing.SystemIcons]::Application
 $script:TrayIcon.Visible = $true
-$script:TrayIcon.Text    = "EMBED Services Dashboard $($script:AppVersion)"
+$script:TrayIcon.Text    = "EMBED Services Dashboard"
 $ctxMenu   = New-Object System.Windows.Forms.ContextMenuStrip
 $miShow    = $ctxMenu.Items.Add('Show Dashboard')
 $ctxMenu.Items.Add('-') | Out-Null
@@ -2869,73 +3088,6 @@ $btnFilterApi.Add_Click({ Apply-Filter 'API' })
 $btnFilterCore.Add_Click({ Apply-Filter 'Core' })
 $btnFilterSQL.Add_Click({ Apply-Filter 'SQL' })
 $btnFilterRemote.Add_Click({ Apply-Filter 'Remote' })
-# Event Drill-Down 
-$EventsGrid.Add_MouseDoubleClick({
-    try {
-        $selected = $EventsGrid.SelectedItem
-        if (-not $selected) {
-            return
-        }
-        $dialog = New-Object Windows.Window
-        $dialog.Owner = $window
-        $dialog.Title = "Event Details"
-        $dialog.Width = 900
-        $dialog.Height = 650
-        $dialog.WindowStartupLocation = 'CenterOwner'
-        $dialog.Background = ColorBrush '#1E1E2E'
-        $dialog.Foreground = ColorBrush '#CDD6F4'
-        $grid = New-Object Windows.Controls.Grid
-        $row1 = New-Object Windows.Controls.RowDefinition
-        $row2 = New-Object Windows.Controls.RowDefinition
-        $row2.Height =
-            New-Object Windows.GridLength(50)
-        $grid.RowDefinitions.Add($row1)
-        $grid.RowDefinitions.Add($row2)
-        $txt = New-Object Windows.Controls.TextBox
-        $txt.IsReadOnly = $true
-        $txt.AcceptsReturn = $true
-        $txt.TextWrapping = 'Wrap'
-        $txt.VerticalScrollBarVisibility = 'Auto'
-        $txt.Background = ColorBrush '#181825'
-        $txt.Foreground = ColorBrush '#CDD6F4'
-        $txt.BorderBrush = ColorBrush '#45475A'
-        $txt.Margin = '10'
-        $txt.Text = @"
-Time:
-$($selected.Time)
-Level:
-$($selected.Level)
-Event ID:
-$($selected.EventId)
-Source:
-$($selected.Source)
-Service:
-$($selected.Service)
-------------------------------------------------------------
-$($selected.FullMessage)
-"@
-        [Windows.Controls.Grid]::SetRow($txt,0)
-        $btnClose = New-Object Windows.Controls.Button
-        $btnClose.Content = 'Close'
-        $btnClose.Width = 100
-        $btnClose.HorizontalAlignment = 'Right'
-        $btnClose.Margin = '10'
-        $btnClose.Add_Click({
-            $dialog.Close()
-        })
-        [Windows.Controls.Grid]::SetRow($btnClose,1)
-        $grid.Children.Add($txt)      | Out-Null
-        $grid.Children.Add($btnClose) | Out-Null
-        $dialog.Content = $grid
-        $dialog.ShowDialog() | Out-Null
-    }
-    catch {
-        [System.Windows.MessageBox]::Show(
-            $_.Exception.Message,
-            'Event Viewer'
-        )
-    }
-})
 # EMBED services in start order (skipped / monitor-only services left out)
 function Get-ControllableDefs([switch]$Reverse) {
     $defs   = @($script:ServiceDefs | Where-Object { -not (Test-Skipped $_.Name) -and -not $_['MonitorOnly'] })
@@ -3015,8 +3167,15 @@ function Apply-SmtpUi {
     $c['CooldownMinutes'] = $cool
     if (-not $c['Username']) {
         $c['PasswordEnc'] = ''
-    } elseif ($pwdSmtp.Password) {
-        $c['PasswordEnc'] = (ConvertTo-SecureString $pwdSmtp.Password -AsPlainText -Force | ConvertFrom-SecureString)
+    } else {
+        $securePassword = $pwdSmtp.SecurePassword
+        try {
+            if ($securePassword.Length -gt 0) {
+                $c['PasswordEnc'] = ConvertFrom-SecureString $securePassword
+            }
+        } finally {
+            $securePassword.Dispose()
+        }
     }
     $pwdSmtp.Clear()
     return $null
@@ -3049,31 +3208,20 @@ Initialize-SmtpUi
 # ------------------------------------------------------------
 # SETTINGS TAB: GITHUB UPDATES
 # ------------------------------------------------------------
-# Background job. Reads version.json from the repo; packaged apps download a verified GitHub release asset.
+# Background job. Reads version.json from the repo; if it is newer (and Download is on) it also fetches the script,
+# checks its hash, checks that it parses as PowerShell and that it declares the version version.json promised.
 $script:UpdateScript = {
-    param($repo, $branch, $token, $currentVersion, $download, $isPackagedExe)
-    $out = [ordered]@{ Ok = $false; Error = ''; Latest = ''; Notes = ''; Newer = $false; File = ''; Content = ''; AssetPath = '' }
-    $assetPath = $null
+    param($repo, $branch, $token, $currentVersion, $download)
+    $out = [ordered]@{ Ok = $false; Error = ''; Latest = ''; Notes = ''; Newer = $false; File = ''; Content = '' }
     function Get-GitHubText([string]$Repo, [string]$Branch, [string]$Path, [string]$Token) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $h = @{ 'User-Agent' = 'EMBED-Services-Dashboard'; 'Accept' = 'application/vnd.github.raw+json' }
-        if ($Token) { $h['Authorization'] = 'Bearer ' + $Token }
         if ($Token) { $h['Authorization'] = "Bearer $Token" }
         $uri = 'https://api.github.com/repos/{0}/contents/{1}?ref={2}' -f $Repo, $Path, $Branch
-        if ($Token) { $h['Authorization'] = 'Bearer ' + $Token }
         $r = Invoke-WebRequest -Uri $uri -Headers $h -UseBasicParsing -TimeoutSec 20
         $c = $r.Content
         if ($c -is [byte[]]) { $c = [Text.Encoding]::UTF8.GetString($c) }
         return ([string]$c).TrimStart([char]0xFEFF)
-    }
-    function Get-GitHubApiHeaders([string]$Token) {
-        $headers = @{
-            'User-Agent' = 'EMBED-Services-Dashboard'
-            'Accept' = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-        }
-        if ($Token) { $headers['Authorization'] = 'Bearer ' + $Token }
-        return $headers
     }
     try {
         $vj = Get-GitHubText $repo $branch 'version.json' $token | ConvertFrom-Json
@@ -3084,62 +3232,28 @@ $script:UpdateScript = {
         $out.Newer  = ([version]$latest -gt [version]$currentVersion)
         $out.Ok     = $true
         if ($out.Newer -and $download) {
-            if ($isPackagedExe) {
-                $assetName = [string]$vj.exeAsset
-                if ($assetName -notmatch '^[A-Za-z0-9._-]+\.exe$') {
-                    throw 'version.json does not name a valid .exe release asset.'
-                }
-                $tag = [string]$vj.releaseTag
-                if (-not $tag) { $tag = "v$latest" }
-                if ($tag -notmatch '^[A-Za-z0-9._-]+$') { throw 'version.json contains an invalid release tag.' }
-                $releaseUri = 'https://api.github.com/repos/{0}/releases/tags/{1}' -f $repo, [Uri]::EscapeDataString($tag)
-                $release = Invoke-RestMethod -Uri $releaseUri -Headers (Get-GitHubApiHeaders $token) -TimeoutSec 30
-                $asset = @($release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1)
-                if ($asset.Count -eq 0) { throw "Release $tag does not include the expected executable asset $assetName." }
-                $asset = $asset[0]
-                $expectedHash = ([string]$vj.exeSha256).ToLower()
-                if (-not $expectedHash -and [string]$asset.digest -match '^sha256:([a-fA-F0-9]{64})$') {
-                    $expectedHash = $Matches[1].ToLower()
-                }
-                if ($expectedHash -notmatch '^[a-f0-9]{64}$') {
-                    throw 'The executable update has no valid SHA-256 digest in version.json or GitHub release metadata.'
-                }
-                $headers = Get-GitHubApiHeaders $token
-                $headers['Accept'] = 'application/octet-stream'
-                $assetPath = Join-Path ([IO.Path]::GetTempPath()) ('EMBED_Dashboard_{0}.exe' -f [Guid]::NewGuid().ToString('N'))
-                [void](Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -Headers $headers -OutFile $assetPath -UseBasicParsing -TimeoutSec 120)
-                $actualHash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLower()
-                if ($actualHash -ne $expectedHash) {
-                    Remove-Item -LiteralPath $assetPath -Force -ErrorAction SilentlyContinue
-                    throw 'The downloaded executable does not match the expected SHA-256 digest, so the update was cancelled.'
-                }
-                $out.File = $assetName
-                $out.AssetPath = $assetPath
-            } else {
-                $file = [string]$vj.file
-                if ($file -notmatch '^[A-Za-z0-9._-]+\.ps1$') { throw 'version.json does not name a valid .ps1 file.' }
-                $content = Get-GitHubText $repo $branch $file $token
-                $norm = $content -replace "`r`n", "`n"
-                $sha  = [System.Security.Cryptography.SHA256]::Create()
-                $hash = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($norm)) | ForEach-Object { $_.ToString('x2') }) -join '')
-                if ($hash -ne ([string]$vj.sha256).ToLower()) { throw 'The downloaded file does not match the hash in version.json, so the update was cancelled.' }
-                $tokens = $null; $errs = $null
-                [void][System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errs)
-                if ($errs -and $errs.Count -gt 0) { throw 'The downloaded file is not valid PowerShell, so the update was cancelled.' }
-                $pat = '\$script:AppVersion\s*=\s*["'']' + [regex]::Escape($latest) + '["'']'
-                if ($content -notmatch $pat) { throw "The downloaded file does not declare version $latest, so the update was cancelled." }
-                $out.File    = $file
-                $out.Content = $content
-            }
+            $file = [string]$vj.file
+            if ($file -notmatch '^[A-Za-z0-9._-]+\.ps1$') { throw 'version.json does not name a valid .ps1 file.' }
+            $content = Get-GitHubText $repo $branch $file $token
+            $norm = $content -replace "`r`n", "`n"
+            $sha  = [System.Security.Cryptography.SHA256]::Create()
+            $hash = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($norm)) | ForEach-Object { $_.ToString('x2') }) -join '')
+            if ($hash -ne ([string]$vj.sha256).ToLower()) { throw 'The downloaded file does not match the hash in version.json, so the update was cancelled.' }
+            $tokens = $null; $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errs)
+            if ($errs -and $errs.Count -gt 0) { throw 'The downloaded file is not valid PowerShell, so the update was cancelled.' }
+            $pat = '\$script:AppVersion\s*=\s*''' + [regex]::Escape($latest) + ''''
+            if ($content -notmatch $pat) { throw "The downloaded file does not declare version $latest, so the update was cancelled." }
+            $out.File    = $file
+            $out.Content = $content
         }
     } catch {
-        if ($assetPath) { Remove-Item -LiteralPath $assetPath -Force -ErrorAction SilentlyContinue }
         $out.Ok = $false
         $msg  = $_.Exception.Message
         $resp = $_.Exception.Response
         if ($resp) {
             $code = [int]$resp.StatusCode
-            if ($code -eq 404) { $msg = 'GitHub could not find the update metadata, release, or asset. Check the repository, branch, version.json, and release tag.' }
+            if ($code -eq 404) { $msg = 'Not found on GitHub. Check the repository name and branch, that version.json is in the repository, and that private repositories have a token.' }
             elseif ($code -eq 401 -or $code -eq 403) { $msg = 'GitHub refused access. Check the token (private repositories), or the rate limit was reached - try again later.' }
         }
         $out.Error = $msg
@@ -3178,8 +3292,13 @@ function Apply-UpdateUi {
     $c['Branch']      = $branch
     $c['AutoCheck']   = [bool]$chkUpdAuto.IsChecked
     $c['AutoInstall'] = [bool]$chkUpdInstall.IsChecked
-    if ($pwdUpdToken.Password) {
-        $c['TokenEnc'] = (ConvertTo-SecureString $pwdUpdToken.Password -AsPlainText -Force | ConvertFrom-SecureString)
+    $secureToken = $pwdUpdToken.SecurePassword
+    try {
+        if ($secureToken.Length -gt 0) {
+            $c['TokenEnc'] = ConvertFrom-SecureString $secureToken
+        }
+    } finally {
+        $secureToken.Dispose()
     }
     $pwdUpdToken.Clear()
     return $null
@@ -3194,7 +3313,7 @@ function Start-UpdateCheck([bool]$Download) {
         $rs.Open()
         $ps = [powershell]::Create()
         $ps.Runspace = $rs
-        [void]$ps.AddScript($script:UpdateScript.ToString()).AddArgument([string]$c['Repo']).AddArgument([string]$c['Branch']).AddArgument((Get-UpdateToken)).AddArgument([string]$script:AppVersion).AddArgument($Download).AddArgument([bool]$script:IsPackagedExe)
+        [void]$ps.AddScript($script:UpdateScript.ToString()).AddArgument([string]$c['Repo']).AddArgument([string]$c['Branch']).AddArgument((Get-UpdateToken)).AddArgument([string]$script:AppVersion).AddArgument($Download)
         $script:UpdateScan = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
         $btnUpdCheck.IsEnabled = $false
     } catch {
@@ -3230,63 +3349,6 @@ function Install-UpdateContent([string]$Content, [string]$NewVersion) {
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$path`""
     [Environment]::Exit(0)
 }
-function Install-ExecutableUpdate([string]$AssetPath, [string]$NewVersion) {
-    $path = [string]$script:SelfPath
-    if (-not $script:IsPackagedExe -or -not $path -or -not (Test-Path -LiteralPath $path)) {
-        Set-UpdateStatus 'Executable updates are only available when running the packaged dashboard EXE.' '#F38BA8'
-        return
-    }
-    $stagedPath = "$path.update"
-    $helperPath = $null
-    try {
-        $backupDir = Join-Path (Split-Path $path -Parent) 'Backups'
-        if (-not (Test-Path -LiteralPath $backupDir)) { [void](New-Item -ItemType Directory -Path $backupDir) }
-        $stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
-        $backupPath = Join-Path $backupDir ('{0}_v{1}_{2}.exe' -f [IO.Path]::GetFileNameWithoutExtension($path), $script:AppVersion, $stamp)
-        Copy-Item -LiteralPath $AssetPath -Destination $stagedPath -Force
-
-        $helperPath = Join-Path ([IO.Path]::GetTempPath()) ('EMBED_Dashboard_Update_{0}.ps1' -f [Guid]::NewGuid().ToString('N'))
-        $helper = @'
-param([int]$ParentProcessId, [string]$TargetPath, [string]$StagedPath, [string]$BackupPath, [string]$LogPath, [string]$DownloadedPath)
-$ErrorActionPreference = 'Stop'
-try {
-    $deadline = (Get-Date).AddMinutes(2)
-    while ((Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 500
-    }
-    if (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) { throw 'The dashboard did not exit in time.' }
-    Copy-Item -LiteralPath $TargetPath -Destination $BackupPath -Force
-    try {
-        Move-Item -LiteralPath $StagedPath -Destination $TargetPath -Force
-        Start-Process -FilePath $TargetPath
-    } catch {
-        Copy-Item -LiteralPath $BackupPath -Destination $TargetPath -Force
-        throw
-    }
-} catch {
-    try { [IO.File]::WriteAllText($LogPath, $_.Exception.Message) } catch {}
-    try {
-        Add-Type -AssemblyName System.Windows.Forms
-        [Windows.Forms.MessageBox]::Show("Dashboard update failed: $($_.Exception.Message)`r`nThe previous executable was restored when possible.", 'Dashboard update', 'OK', 'Error') | Out-Null
-    } catch {}
-} finally {
-    Remove-Item -LiteralPath $StagedPath, $DownloadedPath, $PSCommandPath -Force -ErrorAction SilentlyContinue
-}
-'@
-        [IO.File]::WriteAllText($helperPath, $helper, (New-Object System.Text.UTF8Encoding($true)))
-        $logPath = "$helperPath.log"
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" {1} "{2}" "{3}" "{4}" "{5}" "{6}"' -f $helperPath, $PID, $path, $stagedPath, $backupPath, $logPath, $AssetPath
-        Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden
-    } catch {
-        Remove-Item -LiteralPath $stagedPath, $AssetPath -Force -ErrorAction SilentlyContinue
-        if ($helperPath) { Remove-Item -LiteralPath $helperPath -Force -ErrorAction SilentlyContinue }
-        Set-UpdateStatus "Could not stage executable update: $($_.Exception.Message)" '#F38BA8'
-        return
-    }
-    Set-UpdateStatus "Installing v$NewVersion and restarting..." '#A6E3A1'
-    try { $script:TrayIcon.Visible = $false; $script:TrayIcon.Dispose() } catch {}
-    [Environment]::Exit(0)
-}
 function Complete-UpdateCheck {
     $scan = $script:UpdateScan
     $script:UpdateScan = $null
@@ -3314,11 +3376,9 @@ function Complete-UpdateCheck {
     Set-UpdateStatus "Update available: v$($res.Latest)$note" '#F9E2AF'
     if ($res.Content) {
         Install-UpdateContent ([string]$res.Content) ([string]$res.Latest)
-    } elseif ($res.AssetPath) {
-        Install-ExecutableUpdate ([string]$res.AssetPath) ([string]$res.Latest)
     } elseif ($script:UpdateNotified -ne [string]$res.Latest) {
         $script:UpdateNotified = [string]$res.Latest
-        try { $script:TrayIcon.ShowBalloonTip(6000, "EMBED Services Dashboard $($script:AppVersion)", "Update v$($res.Latest) is available (Settings tab).", [System.Windows.Forms.ToolTipIcon]::Info) } catch {}
+        try { $script:TrayIcon.ShowBalloonTip(6000, 'EMBED Services Dashboard', "Update v$($res.Latest) is available (Settings tab).", [System.Windows.Forms.ToolTipIcon]::Info) } catch {}
     }
 }
 $btnUpdSave.Add_Click({
@@ -3587,7 +3647,7 @@ $btnSnapOpen.Add_Click({
 # REMOTE SERVICES (control EMBED services on another PC)
 # ------------------------------------------------------------
 $dgRemote.ItemsSource = $script:RemoteList
-# Background job: optional Stop/Start/Restart of $targets (in order; stop runs in reverse), then reads the requested remote services.
+# Background job: optional Stop/Start/Restart of $targets (in order; stop runs in reverse), then reads the status of every EMBED service.
 $script:RemoteSvcScript = {
     param($computer, $action, $targets, $queryNames)
     Add-Type -AssemblyName System.ServiceProcess
@@ -3630,24 +3690,46 @@ $script:RemoteSvcScript = {
         }
     }
 
+    # $queryNames holds patterns matched against remote service name and display name.
     $rows = @()
-    foreach ($n in $queryNames) {
-        try {
-            $sc = New-Object System.ServiceProcess.ServiceController($n, $computer)
-            $rows += [PSCustomObject]@{ Name = $n; Status = $sc.Status.ToString(); StartType = $sc.StartType.ToString(); Detail = '' }
+    try {
+        foreach ($sc in [System.ServiceProcess.ServiceController]::GetServices($computer)) {
+            $hit = $false
+            foreach ($p in @($queryNames)) { if ($sc.ServiceName -like $p -or $sc.DisplayName -like $p) { $hit = $true } }
+            if ($hit) {
+                $rows += [PSCustomObject]@{ Name = $sc.ServiceName; Display = $sc.DisplayName; Status = $sc.Status.ToString(); StartType = $sc.StartType.ToString(); Detail = '' }
+            }
             $sc.Dispose()
-        } catch {
-            $e  = Get-Deepest $_
-            $st = 'Error'
-            if ($e -is [System.ComponentModel.Win32Exception] -and $e.NativeErrorCode -eq 1060) { $st = 'NotFound' }
-            $rows += [PSCustomObject]@{ Name = $n; Status = $st; StartType = ''; Detail = $e.Message }
+        }
+    } catch {
+        $rows += [PSCustomObject]@{ Name = ''; Display = ''; Status = 'Error'; StartType = ''; Detail = (Get-Deepest $_).Message }
+    }
+    try {
+        $processes = @(Get-WmiObject -Class Win32_Process -ComputerName $computer -Filter "Name = 'AnyDesk.exe'" -ErrorAction Stop)
+        if ($processes.Count -gt 0) {
+            $pids = (@($processes | ForEach-Object { $_.ProcessId }) -join ', ')
+            $rows += [PSCustomObject]@{
+                Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Running'
+                StartType = 'Process'; Detail = "PID: $pids. Process-only check; service controls do not apply."
+                IsProcess = $true
+            }
+        } else {
+            $rows += [PSCustomObject]@{
+                Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Not running'
+                StartType = 'Process'; Detail = 'Process-only check; service controls do not apply.'
+                IsProcess = $true
+            }
+        }
+    } catch {
+        $rows += [PSCustomObject]@{
+            Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Error'
+            StartType = 'Process'; Detail = "Could not query remote process: $((Get-Deepest $_).Message)"
+            IsProcess = $true
         }
     }
     $connErr = ''
-    if (@($rows | Where-Object { $_.Status -ne 'Error' }).Count -eq 0) {
-        $first = @($rows | Where-Object { $_.Status -eq 'Error' }) | Select-Object -First 1
-        if ($first) { $connErr = $first.Detail }
-    }
+    $first = @($rows | Where-Object { $_.Status -eq 'Error' -and -not $_.Name }) | Select-Object -First 1
+    if ($first) { $connErr = $first.Detail }
     [PSCustomObject]@{ Computer = $computer; Rows = $rows; Log = $log; ConnectError = $connErr }
 }
 function Set-RemoteStatus([string]$text, [string]$hex) { $txtRemStatus.Text = $text; $txtRemStatus.Foreground = ColorBrush $hex }
@@ -3664,47 +3746,16 @@ function Get-RemoteHostFor($dev) {
     if ($dev.Status -in @('Online (no DNS)', 'Unresolved') -and $dev.LastKnownIP) { return [string]$dev.LastKnownIP }
     return [string]$dev.Name
 }
-function Get-RemoteServiceSelection([string]$Computer) {
-    $display = @{}
-    $names = [System.Collections.Generic.List[string]]::new()
-    foreach ($def in $script:ServiceDefs) {
-        $names.Add([string]$def.Name)
-        $display[$def.Name] = $def.Display
-    }
-    foreach ($extra in $script:RemoteServiceDefs) {
-        $matchesComputer = $Computer -ieq $extra.Computer -or
-            $Computer -match ('^{0}\.' -f [regex]::Escape([string]$extra.Computer))
-        if (-not $matchesComputer) {
-            $matchesComputer = @($script:Devices | Where-Object {
-                $_.Name -ieq $extra.Computer -and $_.LastKnownIP -eq $Computer
-            }).Count -gt 0
-        }
-        if ($matchesComputer) {
-            $names.Add([string]$extra.Name)
-            $display[$extra.Name] = $extra.Display
-        }
-    }
-    return [PSCustomObject]@{ Names = [string[]]$names.ToArray(); DisplayNames = $display }
-}
 function Start-RemoteJob([string]$Action, [string[]]$Targets) {
     $computer = $txtRemHost.Text.Trim()
     if (-not $computer) { Set-RemoteStatus 'Enter a computer name or IP first.' '#F38BA8'; return }
     if ($computer -notmatch '^[A-Za-z0-9._-]+$') { Set-RemoteStatus 'Use letters, numbers, dots, dashes or underscores only.' '#F38BA8'; return }
     if ($script:RemoteJob) { Set-RemoteStatus 'Still working on the last request...' '#89B4FA'; return }
-    $selection = Get-RemoteServiceSelection $computer
-    if ($Action -ne 'Query') {
-        foreach ($target in $Targets) {
-            if ($target -notin $selection.Names) {
-                Set-RemoteStatus "The selected service is not configured for $computer. Load that computer's services again." '#F38BA8'
-                return
-            }
-        }
-    }
-    $script:RemoteDisplayNames = $selection.DisplayNames
+    $names = [string[]]@('TeamViewer*', 'Spooler', '*Spooler*', 'AnyDesk*')
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:RemoteSvcScript.ToString()).AddArgument($computer).AddArgument($Action).AddArgument([string[]]@($Targets)).AddArgument($selection.Names)
+        [void]$ps.AddScript($script:RemoteSvcScript.ToString()).AddArgument($computer).AddArgument($Action).AddArgument([string[]]@($Targets)).AddArgument($names)
         $script:RemoteJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Action = $Action }
         Set-RemoteButtons $false
         $verb = @{ Query = 'Loading services'; Start = 'Starting'; Stop = 'Stopping'; Restart = 'Restarting' }[$Action]
@@ -3725,7 +3776,8 @@ function Complete-RemoteJob {
     finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
     if (-not $res) { Set-RemoteStatus 'The request returned nothing.' '#F38BA8'; return }
 
-    $display = $script:RemoteDisplayNames
+    $display = @{}; foreach ($d in $script:ServiceDefs) { $display[$d.Name] = $d.Display }
+    foreach ($r in @($res.Rows)) { if ($r.Name) { $display[$r.Name] = $r.Display } }
     foreach ($l in @($res.Log)) {
         Add-HistoryEntry -ServiceName "$($res.Computer): $($display[$l.Name])" -Group 'Remote' -OldStatus '' -NewStatus $l.Result -Note $l.Note
     }
@@ -3734,10 +3786,15 @@ function Complete-RemoteJob {
         Set-RemoteStatus ("Could not reach {0}: {1}{2}" -f $res.Computer, $res.ConnectError, (Get-RemoteHint $res.ConnectError)) '#F38BA8'
         return
     }
-    $notInstalled = 0
     foreach ($r in @($res.Rows)) {
-        if ($r.Status -eq 'NotFound') { $notInstalled++; continue }
-        $script:RemoteList.Add([PSCustomObject]@{ Display = $display[$r.Name]; Name = $r.Name; Status = $r.Status; StartType = $r.StartType })
+        if (-not $r.Name) { continue }
+        $isProcess = $false
+        $processProperty = $r.PSObject.Properties['IsProcess']
+        if ($processProperty) { $isProcess = [bool]$processProperty.Value }
+        $script:RemoteList.Add([PSCustomObject]@{
+            Display = $r.Display; Name = $r.Name; Status = $r.Status
+            StartType = $r.StartType; Detail = $r.Detail; IsProcess = $isProcess
+        })
     }
     $failed = @($res.Log | Where-Object { $_.Result -eq 'Failed' })
     $when   = (Get-Date).ToString('HH:mm:ss')
@@ -3745,7 +3802,8 @@ function Complete-RemoteJob {
         $f = $failed[0]
         Set-RemoteStatus ("{0} action(s) failed on {1}. {2}: {3}{4}" -f $failed.Count, $res.Computer, $display[$f.Name], $f.Note, (Get-RemoteHint $f.Note)) '#F38BA8'
     } elseif ($job.Action -eq 'Query') {
-        Set-RemoteStatus ("Loaded {0} service(s) from {1} at {2} ({3} not installed there)." -f $script:RemoteList.Count, $res.Computer, $when, $notInstalled) '#A6E3A1'
+        if ($script:RemoteList.Count -eq 0) { Set-RemoteStatus ("No matching remote services or processes found on {0} (checked at {1})." -f $res.Computer, $when) '#F9E2AF' }
+        else { Set-RemoteStatus ("Loaded {0} remote service/process check(s) from {1} at {2}." -f $script:RemoteList.Count, $res.Computer, $when) '#A6E3A1' }
     } else {
         Set-RemoteStatus ("{0} finished on {1} at {2}." -f $job.Action, $res.Computer, $when) '#A6E3A1'
     }
@@ -3753,6 +3811,7 @@ function Complete-RemoteJob {
 function Invoke-RemoteRowAction([string]$Action) {
     $row = $dgRemote.SelectedItem
     if (-not $row) { Set-RemoteStatus 'Select a service in the list first.' '#F9E2AF'; return }
+    if ($row.IsProcess) { Set-RemoteStatus 'AnyDesk.exe is monitored as a process; service controls do not apply.' '#F9E2AF'; return }
     if ($Action -ne 'Start') {
         $ans = [System.Windows.MessageBox]::Show("$Action $($row.Display) on $($txtRemHost.Text.Trim())?`r`nAnyone using it on that PC will be interrupted.", 'Remote service', 'YesNo', 'Question')
         if ($ans -ne 'Yes') { return }
@@ -3764,6 +3823,7 @@ $btnDevServices.Add_Click({
     if ($dev) { $txtRemHost.Text = Get-RemoteHostFor $dev }
     $script:RemoteList.Clear()
     $pnlDiscover.Visibility = 'Collapsed'
+    $pnlRemoteAdmin.Visibility = 'Collapsed'
     $pnlRemote.Visibility = 'Visible'
     if ($txtRemHost.Text.Trim()) { Start-RemoteJob 'Query' @() }
     else { Set-RemoteStatus 'Type a computer name or IP, then click Load Services.' '#6C7086' }
@@ -3790,6 +3850,623 @@ $btnRemStack.Add_Click({
     Start-RemoteJob 'Restart' $stack
 })
 # ------------------------------------------------------------
+# FIXED REMOTE ADMIN TASKS (HTTP TrustedHosts or HTTPS; no arbitrary command entry)
+# ------------------------------------------------------------
+$dgAdminServices.ItemsSource = $script:RemoteAdminList
+$script:RemoteAdminScript = {
+    param([string]$computer, [System.Management.Automation.PSCredential]$credential, [string]$transport, [string]$task, [string]$serviceName)
+    $session = $null
+    try {
+        $sessionOptions = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 30000
+        $sessionParams = @{
+            ComputerName = $computer
+            Authentication = 'Negotiate'
+            Credential = $credential
+            SessionOption = $sessionOptions
+            ErrorAction = 'Stop'
+        }
+        if ($transport -eq 'HTTPS') { $sessionParams.UseSSL = $true }
+        $session = New-PSSession @sessionParams
+        switch ($task) {
+            'Check' {
+                $data = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    $rdpDeny = (Get-ItemProperty -LiteralPath 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -ErrorAction Stop).fDenyTSConnections
+                    $rules = @(Get-NetFirewallRule -Name 'RemoteDesktop*' -ErrorAction SilentlyContinue)
+                    [PSCustomObject]@{
+                        Computer = $env:COMPUTERNAME
+                        RdpEnabled = ([int]$rdpDeny -eq 0)
+                        EnabledFirewallRules = @($rules | Where-Object { $_.Enabled -eq 'True' }).Count
+                        FirewallRulesFound = $rules.Count
+                    }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            'EnableRdp' {
+                $data = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    Set-ItemProperty -LiteralPath 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Stop | Out-Null
+                    Set-ItemProperty -LiteralPath 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -ErrorAction Stop | Out-Null
+                    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction Stop | Out-Null
+                    [PSCustomObject]@{ Computer = $env:COMPUTERNAME; RdpEnabled = $true }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            'LoadServices' {
+                $rows = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    $services = @(Get-Service -ErrorAction Stop | Where-Object {
+                        $_.Name -eq 'Spooler' -or $_.DisplayName -like '*Print Spooler*' -or
+                        $_.Name -like 'TeamViewer*' -or $_.DisplayName -like '*TeamViewer*' -or
+                        $_.Name -like 'AnyDesk*' -or $_.DisplayName -like '*AnyDesk*'
+                    })
+                    $results = @()
+                    foreach ($service in $services) {
+                        $results += [PSCustomObject]@{
+                            Name = $service.Name; Display = $service.DisplayName; Status = $service.Status.ToString()
+                            StartType = $service.StartType.ToString(); Detail = ''; IsProcess = $false
+                        }
+                    }
+                    if (-not (@($services | Where-Object { $_.Name -eq 'Spooler' }).Count)) {
+                        $results += [PSCustomObject]@{
+                            Name = 'Spooler'; Display = 'Print Spooler'; Status = 'Not installed'
+                            StartType = ''; Detail = 'Print Spooler service was not found.'; IsProcess = $false
+                        }
+                    }
+                    $processes = @(Get-Process -Name AnyDesk -ErrorAction SilentlyContinue)
+                    if ($processes.Count -gt 0) {
+                        $pids = (@($processes | ForEach-Object { $_.Id }) -join ', ')
+                        $results += [PSCustomObject]@{
+                            Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Running'
+                            StartType = 'Process'; Detail = "PID: $pids. Process-only check."; IsProcess = $true
+                        }
+                    } else {
+                        $results += [PSCustomObject]@{
+                            Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Not running'
+                            StartType = 'Process'; Detail = 'Process-only check.'; IsProcess = $true
+                        }
+                    }
+                    $results
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Rows = @($rows) }
+            }
+            { $_ -in 'StartService', 'RestartService' } {
+                if ($serviceName -ne 'Spooler' -and $serviceName -notlike 'TeamViewer*' -and $serviceName -notlike 'AnyDesk*') {
+                    throw "Service '$serviceName' is not in the allowed remote service list."
+                }
+                $data = Invoke-Command -Session $session -ArgumentList $task, $serviceName -ErrorAction Stop -ScriptBlock {
+                    param($operation, $name)
+                    $service = Get-Service -Name $name -ErrorAction Stop
+                    if ($service.StartType -eq 'Disabled') { throw "Service '$name' is disabled." }
+                    if ($operation -eq 'StartService') {
+                        if ($service.Status -ne 'Running') {
+                            Start-Service -Name $name -ErrorAction Stop
+                            (Get-Service -Name $name -ErrorAction Stop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+                        }
+                    } else {
+                        if ($service.Status -eq 'Running') {
+                            Restart-Service -Name $name -Force -ErrorAction Stop
+                        } else {
+                            Start-Service -Name $name -ErrorAction Stop
+                        }
+                        (Get-Service -Name $name -ErrorAction Stop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+                    }
+                    [PSCustomObject]@{ Computer = $env:COMPUTERNAME; Name = $name; Status = (Get-Service -Name $name).Status.ToString() }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            default { throw "Unsupported remote task '$task'." }
+        }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Task = $task; Error = $_.Exception.Message }
+    } finally {
+        if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+    }
+}
+$script:RemoteAdminWmiScript = {
+    param([string]$computer, [System.Management.Automation.PSCredential]$credential, [string]$task, [string]$serviceName)
+    $scope = $null
+    $defaultScope = $null
+    $firewallScope = $null
+    $registry = $null
+    $password = $null
+    try {
+        Add-Type -AssemblyName System.Management
+        $networkCredential = New-Object System.Net.NetworkCredential('', $credential.Password)
+        $password = $networkCredential.Password
+        $connectionOptions = New-Object System.Management.ConnectionOptions
+        $connectionOptions.Username = $credential.UserName
+        $connectionOptions.Password = $password
+        $connectionOptions.Impersonation = [System.Management.ImpersonationLevel]::Impersonate
+        $connectionOptions.Authentication = [System.Management.AuthenticationLevel]::PacketPrivacy
+        $connectionOptions.EnablePrivileges = $true
+        $connectionOptions.Timeout = [TimeSpan]::FromSeconds(15)
+
+        $scope = New-Object System.Management.ManagementScope("\\$computer\root\cimv2", $connectionOptions)
+        $scope.Connect()
+        $defaultScope = New-Object System.Management.ManagementScope("\\$computer\root\default", $connectionOptions)
+        $firewallScope = New-Object System.Management.ManagementScope("\\$computer\root\standardcimv2", $connectionOptions)
+        $defaultScope.Connect()
+        $firewallScope.Connect()
+
+        $registryPath = 'System\CurrentControlSet\Control\Terminal Server'
+        $regClass = New-Object System.Management.ManagementClass($defaultScope, (New-Object System.Management.ManagementPath('StdRegProv')), $null)
+        $registry = $regClass
+        $hklm = [uint32]2147483650
+        $findFirewallRules = {
+            $query = New-Object System.Management.ObjectQuery("SELECT * FROM MSFT_NetFirewallRule WHERE DisplayGroup = 'Remote Desktop'")
+            $searcher = New-Object System.Management.ManagementObjectSearcher($firewallScope, $query)
+            try { return @($searcher.Get()) } finally { $searcher.Dispose() }
+        }
+
+        switch ($task) {
+            'Check' {
+                $inputParams = $registry.GetMethodParameters('GetDWORDValue')
+                $inputParams.hDefKey = $hklm
+                $inputParams.sSubKeyName = $registryPath
+                $inputParams.sValueName = 'fDenyTSConnections'
+                $rdpResult = $registry.InvokeMethod('GetDWORDValue', $inputParams, $null)
+                if ($rdpResult.ReturnValue -ne 0) { throw "Could not read the Remote Desktop registry value (WMI return $($rdpResult.ReturnValue))." }
+
+                $rules = @(& $findFirewallRules)
+                $enabledRules = @($rules | Where-Object { [int]$_.Enabled -eq 1 }).Count
+                $data = [PSCustomObject]@{
+                    Computer = $computer
+                    RdpEnabled = ([int]$rdpResult.uValue -eq 0)
+                    EnabledFirewallRules = $enabledRules
+                    FirewallRulesFound = $rules.Count
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            'EnableWinRM' {
+                $processClass = New-Object System.Management.ManagementClass(
+                    $scope, (New-Object System.Management.ManagementPath('Win32_Process')), $null)
+                $processResult = $null
+                try {
+                    $inputParams = $processClass.GetMethodParameters('Create')
+                    $inputParams.CommandLine = 'cmd.exe /d /c winrm quickconfig -force'
+                    $processResult = $processClass.InvokeMethod('Create', $inputParams, $null)
+                    $processReturnValue = [int]$processResult.ReturnValue
+                    $processId = [uint32]$processResult.ProcessId
+                } finally {
+                    if ($processResult) { $processResult.Dispose() }
+                    $processClass.Dispose()
+                }
+                if ($processReturnValue -ne 0) {
+                    throw "Could not start winrm quickconfig (WMI return $processReturnValue)."
+                }
+
+                $deadline = (Get-Date).AddSeconds(90)
+                $processRunning = $true
+                while ($processRunning -and (Get-Date) -lt $deadline) {
+                    Start-Sleep -Milliseconds 500
+                    $processQuery = New-Object System.Management.ObjectQuery(
+                        "SELECT ProcessId FROM Win32_Process WHERE ProcessId = $processId")
+                    $processSearcher = New-Object System.Management.ManagementObjectSearcher($scope, $processQuery)
+                    $processes = @()
+                    try {
+                        $processes = @($processSearcher.Get())
+                        $processRunning = ($processes.Count -gt 0)
+                    } finally {
+                        foreach ($process in $processes) { $process.Dispose() }
+                        $processSearcher.Dispose()
+                    }
+                }
+                if ($processRunning) {
+                    throw 'Timed out waiting for winrm quickconfig to finish. The target may still be configuring WinRM; check it before retrying.'
+                }
+
+                $serviceQuery = New-Object System.Management.ObjectQuery(
+                    "SELECT State, StartMode FROM Win32_Service WHERE Name = 'WinRM'")
+                $serviceSearcher = New-Object System.Management.ManagementObjectSearcher($scope, $serviceQuery)
+                $services = @()
+                try {
+                    $services = @($serviceSearcher.Get())
+                    $winRmService = $services | Select-Object -First 1
+                    if (-not $winRmService) { throw 'The target WinRM service was not found after quickconfig.' }
+                    $serviceState = [string]$winRmService.State
+                    $serviceStartMode = [string]$winRmService.StartMode
+                } finally {
+                    foreach ($service in $services) { $service.Dispose() }
+                    $serviceSearcher.Dispose()
+                }
+                if ($serviceState -ne 'Running') {
+                    throw "winrm quickconfig finished, but the WinRM service is $serviceState (startup: $serviceStartMode)."
+                }
+
+                $listenerPath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Listener'
+                $listenerParams = $registry.GetMethodParameters('EnumKey')
+                $listenerParams.hDefKey = $hklm
+                $listenerParams.sSubKeyName = $listenerPath
+                $listenerResult = $registry.InvokeMethod('EnumKey', $listenerParams, $null)
+                if ($listenerResult.ReturnValue -ne 0) {
+                    throw "winrm quickconfig finished, but the WinRM listener configuration could not be read (WMI return $($listenerResult.ReturnValue))."
+                }
+                $httpPort = ''
+                foreach ($listenerName in @($listenerResult.sNames)) {
+                    $valueParams = $registry.GetMethodParameters('GetStringValue')
+                    $valueParams.hDefKey = $hklm
+                    $valueParams.sSubKeyName = "$listenerPath\$listenerName"
+                    $valueParams.sValueName = 'Transport'
+                    $transportResult = $registry.InvokeMethod('GetStringValue', $valueParams, $null)
+                    if ($transportResult.ReturnValue -ne 0) {
+                        $transportResult.Dispose()
+                        continue
+                    }
+                    $listenerTransport = [string]$transportResult.sValue
+                    $transportResult.Dispose()
+                    if ($listenerTransport -ne 'HTTP') { continue }
+                    $portParams = $registry.GetMethodParameters('GetDWORDValue')
+                    $portParams.hDefKey = $hklm
+                    $portParams.sSubKeyName = "$listenerPath\$listenerName"
+                    $portParams.sValueName = 'Port'
+                    $portResult = $registry.InvokeMethod('GetDWORDValue', $portParams, $null)
+                    if ($portResult.ReturnValue -eq 0) {
+                        $httpPort = [string]$portResult.uValue
+                    } else {
+                        $portResult.Dispose()
+                        $portParams = $registry.GetMethodParameters('GetStringValue')
+                        $portParams.hDefKey = $hklm
+                        $portParams.sSubKeyName = "$listenerPath\$listenerName"
+                        $portParams.sValueName = 'Port'
+                        $portResult = $registry.InvokeMethod('GetStringValue', $portParams, $null)
+                        if ($portResult.ReturnValue -eq 0) { $httpPort = [string]$portResult.sValue }
+                    }
+                    $portResult.Dispose()
+                    if ($httpPort) { break }
+                }
+                $listenerResult.Dispose()
+                if (-not $httpPort) {
+                    throw 'winrm quickconfig finished, but no HTTP WinRM listener was found.'
+                }
+
+                $firewallQuery = New-Object System.Management.ObjectQuery(
+                    "SELECT Enabled FROM MSFT_NetFirewallRule WHERE Name LIKE 'WINRM-HTTP-In-TCP%'")
+                $firewallSearcher = New-Object System.Management.ManagementObjectSearcher($firewallScope, $firewallQuery)
+                $firewallRules = @()
+                try {
+                    $firewallRules = @($firewallSearcher.Get())
+                    $enabledFirewallRules = @($firewallRules | Where-Object { [int]$_.Enabled -eq 1 }).Count
+                } finally {
+                    foreach ($firewallRule in $firewallRules) { $firewallRule.Dispose() }
+                    $firewallSearcher.Dispose()
+                }
+                return [PSCustomObject]@{
+                    Ok = $true; Task = $task
+                    Data = [PSCustomObject]@{
+                        Computer = $computer; ServiceStatus = $serviceState
+                        ListenerPort = $httpPort; EnabledFirewallRules = $enabledFirewallRules
+                    }
+                }
+            }
+            'EnableRdp' {
+                foreach ($entry in @(
+                    @{ Path = $registryPath; Name = 'fDenyTSConnections'; Value = [uint32]0 },
+                    @{ Path = ($registryPath + '\WinStations\RDP-Tcp'); Name = 'UserAuthentication'; Value = [uint32]1 }
+                )) {
+                    $inputParams = $registry.GetMethodParameters('SetDWORDValue')
+                    $inputParams.hDefKey = $hklm
+                    $inputParams.sSubKeyName = $entry.Path
+                    $inputParams.sValueName = $entry.Name
+                    $inputParams.uValue = $entry.Value
+                    $setResult = $registry.InvokeMethod('SetDWORDValue', $inputParams, $null)
+                    if ($setResult.ReturnValue -ne 0) { throw "Could not set $($entry.Name) (WMI return $($setResult.ReturnValue))." }
+                }
+                $rules = @(& $findFirewallRules)
+                if ($rules.Count -eq 0) { throw 'No Remote Desktop firewall rules were found in root\standardcimv2.' }
+                foreach ($rule in $rules) {
+                    if ([int]$rule.Enabled -ne 1) {
+                        $rule['Enabled'] = [uint16]1
+                        $null = $rule.Put()
+                    }
+                    $rule.Dispose()
+                }
+                return [PSCustomObject]@{
+                    Ok = $true; Task = $task
+                    Data = [PSCustomObject]@{ Computer = $computer; RdpEnabled = $true; FirewallRulesEnabled = $rules.Count }
+                }
+            }
+            'LoadServices' {
+                $query = New-Object System.Management.ObjectQuery('SELECT Name, DisplayName, State, StartMode FROM Win32_Service')
+                $searcher = New-Object System.Management.ManagementObjectSearcher($scope, $query)
+                try { $services = @($searcher.Get()) } finally { $searcher.Dispose() }
+                $rows = @()
+                $hasSpooler = $false
+                foreach ($service in $services) {
+                    $matches = ($service.Name -eq 'Spooler' -or $service.DisplayName -like '*Print Spooler*' -or
+                        $service.Name -like 'TeamViewer*' -or $service.DisplayName -like '*TeamViewer*' -or
+                        $service.Name -like 'AnyDesk*' -or $service.DisplayName -like '*AnyDesk*')
+                    if ($matches) {
+                        if ($service.Name -eq 'Spooler') { $hasSpooler = $true }
+                        $status = [string]$service.State
+                        if ($status -eq 'Running') { $status = 'Running' }
+                        elseif ($status -eq 'Stopped') { $status = 'Stopped' }
+                        $rows += [PSCustomObject]@{
+                            Name = [string]$service.Name; Display = [string]$service.DisplayName
+                            Status = $status; StartType = [string]$service.StartMode; Detail = ''; IsProcess = $false
+                        }
+                    }
+                    $service.Dispose()
+                }
+                if (-not $hasSpooler) {
+                    $rows += [PSCustomObject]@{
+                        Name = 'Spooler'; Display = 'Print Spooler'; Status = 'Not installed'
+                        StartType = ''; Detail = 'Print Spooler service was not found.'; IsProcess = $false
+                    }
+                }
+                $processQuery = New-Object System.Management.ObjectQuery("SELECT ProcessId FROM Win32_Process WHERE Name = 'AnyDesk.exe'")
+                $processSearcher = New-Object System.Management.ManagementObjectSearcher($scope, $processQuery)
+                try { $processes = @($processSearcher.Get()) } finally { $processSearcher.Dispose() }
+                if ($processes.Count -gt 0) {
+                    $pids = (@($processes | ForEach-Object { $_.ProcessId }) -join ', ')
+                    $rows += [PSCustomObject]@{
+                        Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Running'
+                        StartType = 'Process'; Detail = "PID: $pids. Process-only check."; IsProcess = $true
+                    }
+                    foreach ($process in $processes) { $process.Dispose() }
+                } else {
+                    $rows += [PSCustomObject]@{
+                        Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Not running'
+                        StartType = 'Process'; Detail = 'Process-only check.'; IsProcess = $true
+                    }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Rows = $rows }
+            }
+            { $_ -in 'StartService', 'RestartService' } {
+                if ($serviceName -ne 'Spooler' -and $serviceName -notlike 'TeamViewer*' -and $serviceName -notlike 'AnyDesk*') {
+                    throw "Service '$serviceName' is not in the allowed remote service list."
+                }
+                $escapedName = $serviceName.Replace('\', '\\').Replace("'", "\'")
+                $query = New-Object System.Management.ObjectQuery("SELECT * FROM Win32_Service WHERE Name = '$escapedName'")
+                $searcher = New-Object System.Management.ManagementObjectSearcher($scope, $query)
+                try { $service = @($searcher.Get()) | Select-Object -First 1 } finally { $searcher.Dispose() }
+                if (-not $service) { throw "Service '$serviceName' was not found." }
+                if ([string]$service.StartMode -eq 'Disabled') { throw "Service '$serviceName' is disabled." }
+                if ($task -eq 'RestartService' -and [string]$service.State -eq 'Running') {
+                    $stopResult = $service.InvokeMethod('StopService', $null, $null)
+                    if ($stopResult.ReturnValue -ne 0) { throw "Could not stop '$serviceName' (WMI return $($stopResult.ReturnValue))." }
+                    $deadline = (Get-Date).AddSeconds(30)
+                    do {
+                        Start-Sleep -Milliseconds 500
+                        $service.Get()
+                    } while ([string]$service.State -ne 'Stopped' -and (Get-Date) -lt $deadline)
+                    if ([string]$service.State -ne 'Stopped') { throw "Timed out waiting for '$serviceName' to stop." }
+                }
+                if ([string]$service.State -ne 'Running') {
+                    $startResult = $service.InvokeMethod('StartService', $null, $null)
+                    if ($startResult.ReturnValue -ne 0) { throw "Could not start '$serviceName' (WMI return $($startResult.ReturnValue))." }
+                }
+                $deadline = (Get-Date).AddSeconds(30)
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $service.Get()
+                } while ([string]$service.State -ne 'Running' -and (Get-Date) -lt $deadline)
+                if ([string]$service.State -ne 'Running') { throw "Timed out waiting for '$serviceName' to run." }
+                $data = [PSCustomObject]@{ Computer = $computer; Name = $serviceName; Status = [string]$service.State }
+                $service.Dispose()
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            default { throw "Unsupported remote task '$task'." }
+        }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Task = $task; Error = $_.Exception.Message }
+    } finally {
+        if ($registry) { $registry.Dispose() }
+        if ($scope) { $scope.Dispose() }
+        if ($defaultScope) { $defaultScope.Dispose() }
+        if ($firewallScope) { $firewallScope.Dispose() }
+        $password = $null
+    }
+}
+function Set-RemoteAdminStatus([string]$text, [string]$hex) {
+    $txtAdminStatus.Text = $text
+    $txtAdminStatus.Foreground = ColorBrush $hex
+}
+function Set-RemoteAdminButtons([bool]$enabled) {
+    foreach ($button in @($btnAdminCheck, $btnAdminEnableRdp, $btnAdminEnableWinRm, $btnAdminLoadServices, $btnAdminStartService, $btnAdminRestartService)) {
+        $button.IsEnabled = $enabled
+    }
+}
+function Start-RemoteAdminTask([string]$Task, [string]$ServiceName) {
+    $computer = $txtAdminHost.Text.Trim()
+    $transport = switch ($cmbAdminTransport.SelectedIndex) {
+        1 { 'HTTPS' }
+        2 { 'WMI/DCOM' }
+        default { 'HTTP' }
+    }
+    if (-not $computer -or $computer -notmatch '^[A-Za-z0-9._-]+$') {
+        Set-RemoteAdminStatus 'Enter a valid computer hostname or IP.' '#F38BA8'
+        return
+    }
+    if ($script:RemoteAdminJob) { Set-RemoteAdminStatus 'A remote admin task is already running.' '#F9E2AF'; return }
+    if ($Task -eq 'EnableWinRM' -and $transport -ne 'WMI/DCOM') {
+        Set-RemoteAdminStatus 'Select WMI / DCOM to enable WinRM; this action cannot bootstrap through WinRM.' '#F9E2AF'
+        return
+    }
+    if ($transport -eq 'HTTP') {
+        try {
+            $trustedHosts = [string](Get-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -ErrorAction Stop).Value
+            $trustedEntries = @($trustedHosts -split ',' | ForEach-Object { $_.Trim() })
+            if ($computer -notin $trustedEntries) {
+                Set-RemoteAdminStatus "HTTP WinRM blocked: '$computer' is not an exact TrustedHosts entry on this PC. Add only the intended target IP/name to TrustedHosts, then retry." '#F38BA8'
+                return
+            }
+        } catch {
+            Set-RemoteAdminStatus "Could not read this PC's WinRM TrustedHosts configuration: $($_.Exception.Message)" '#F38BA8'
+            return
+        }
+    }
+    $device = $dgDevices.SelectedItem
+    $credentialHost = [string]$computer
+    if ($device -and $device.Name -and
+        ($computer -ieq [string]$device.Name -or $computer -in @([string]$device.CurrentIP, [string]$device.LastKnownIP))) {
+        $credentialHost = ([string]$device.Name -split '\.')[0]
+    }
+    $credentialUser = 'emb-ecs'
+    if ($credentialHost -and $credentialHost -notmatch '^[0-9.]+$' -and $credentialHost -notmatch '^[0-9A-Fa-f:]+$') {
+        $credentialUser = "$credentialHost\emb-ecs"
+    } elseif ($device -and $device.Name) {
+        $resolvedHost = ([string]$device.Name -split '\.')[0]
+        if ($resolvedHost) { $credentialUser = "$resolvedHost\emb-ecs" }
+    }
+    $credential = $null
+    $rs = $null
+    $ps = $null
+    try {
+        $credential = Get-Credential -UserName $credentialUser -Message "Enter an administrator account for $computer ($transport)."
+        if (-not $credential) { Set-RemoteAdminStatus 'Cancelled; no remote task was run.' '#6C7086'; return }
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        $workerScript = $script:RemoteAdminScript
+        if ($transport -eq 'WMI/DCOM') { $workerScript = $script:RemoteAdminWmiScript }
+        if ($transport -eq 'WMI/DCOM') {
+            [void]$ps.AddScript($workerScript.ToString()).AddArgument($computer).AddArgument($credential).AddArgument($Task).AddArgument($ServiceName)
+        } else {
+            [void]$ps.AddScript($workerScript.ToString()).AddArgument($computer).AddArgument($credential).AddArgument($transport).AddArgument($Task).AddArgument($ServiceName)
+        }
+        $script:RemoteAdminJob = @{
+            PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Task = $Task
+            Computer = $computer; Credential = $credential; Transport = $transport
+        }
+        if ($Task -eq 'LoadServices') {
+            $script:RemoteAdminList.Clear()
+            $script:RemoteAdminListHost = ''
+            $script:RemoteAdminListTransport = ''
+        }
+        Set-RemoteAdminButtons $false
+        $taskLabel = @{
+            Check = "Checking $transport, RDP, and firewall status"
+            EnableRdp = 'Enabling RDP'
+            EnableWinRM = 'Configuring WinRM through WMI/DCOM'
+            LoadServices = 'Checking services'
+            StartService = "Starting $ServiceName"
+            RestartService = "Restarting $ServiceName"
+        }[$Task]
+        Set-RemoteAdminStatus "$taskLabel on $computer..." '#89B4FA'
+    } catch {
+        if ($credential -and $credential.Password) { $credential.Password.Dispose() }
+        if ($ps) { $ps.Dispose() }
+        if ($rs) { if ($rs.RunspaceStateInfo.State -eq 'Opened') { $rs.Close() }; $rs.Dispose() }
+        Set-RemoteAdminButtons $true
+        Set-RemoteAdminStatus "Could not start remote task: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-RemoteAdminTask {
+    $job = $script:RemoteAdminJob
+    $script:RemoteAdminJob = $null
+    Set-RemoteAdminButtons $true
+    $result = $null
+    try {
+        $result = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1
+    } catch {
+        Set-RemoteAdminStatus "Remote task failed: $($_.Exception.Message)" '#F38BA8'
+        return
+    } finally {
+        try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {}
+        if ($job.Credential -and $job.Credential.Password) { $job.Credential.Password.Dispose() }
+    }
+    if (-not $result) { Set-RemoteAdminStatus 'The remote task returned no result.' '#F38BA8'; return }
+    if (-not $result.Ok) {
+        $setupHint = 'Confirm WinRM is enabled on the target and that the account is an administrator.'
+        if ($job.Transport -eq 'HTTP') {
+            $setupHint = 'Confirm the target has the default HTTP WinRM listener, this exact target is in TrustedHosts, and the account is an administrator.'
+        } elseif ($job.Transport -eq 'HTTPS') {
+            $setupHint = 'Confirm the target has an HTTPS WinRM listener, a trusted certificate matching the hostname, and an administrator account.'
+        } else {
+            $setupHint = 'Confirm TCP 135 and the dynamic RPC port range are allowed through the target firewall, WMI/DCOM remote access is enabled, and the account is an administrator.'
+        }
+        Set-RemoteAdminStatus ("{0} remote task failed on {1}: {2} {3}" -f $job.Transport, $job.Computer, $result.Error, $setupHint) '#F38BA8'
+        return
+    }
+    switch ($job.Task) {
+        'Check' {
+            $rdp = 'Disabled'; if ($result.Data.RdpEnabled) { $rdp = 'Enabled' }
+            $firewall = "$($result.Data.EnabledFirewallRules) enabled of $($result.Data.FirewallRulesFound) RDP firewall rules"
+            if ($result.Data.FirewallRulesFound -eq 0) { $firewall = 'No matching RDP firewall rules found' }
+            Set-RemoteAdminStatus ("{0} connected to {1}. RDP: {2}; {3}." -f $job.Transport, $result.Data.Computer, $rdp, $firewall) '#A6E3A1'
+        }
+        'EnableRdp' {
+            Set-RemoteAdminStatus ("RDP and the Remote Desktop firewall group were enabled on {0}. Test the RDP connection." -f $result.Data.Computer) '#A6E3A1'
+        }
+        'EnableWinRM' {
+            $message = "WinRM HTTP is enabled on {0} (listener port {1}; service {2})." -f $result.Data.Computer, $result.Data.ListenerPort, $result.Data.ServiceStatus
+            if ($result.Data.EnabledFirewallRules -gt 0) {
+                $message += " $($result.Data.EnabledFirewallRules) matching inbound firewall rule(s) are enabled."
+                Set-RemoteAdminStatus $message '#A6E3A1'
+            } else {
+                $message += ' No enabled WinRM HTTP firewall rule was found; check the target firewall or Group Policy.'
+                Set-RemoteAdminStatus $message '#F9E2AF'
+            }
+        }
+        'LoadServices' {
+            $script:RemoteAdminList.Clear()
+            foreach ($row in @($result.Rows)) { $script:RemoteAdminList.Add($row) }
+            $script:RemoteAdminListHost = [string]$job.Computer
+            $script:RemoteAdminListTransport = [string]$job.Transport
+            Set-RemoteAdminStatus ("Loaded {0} service/process checks from {1}. AnyDesk.exe is check-only." -f $script:RemoteAdminList.Count, $job.Computer) '#A6E3A1'
+        }
+        { $_ -in 'StartService', 'RestartService' } {
+            Set-RemoteAdminStatus ("{0} is {1} on {2}." -f $result.Data.Name, $result.Data.Status, $job.Computer) '#A6E3A1'
+        }
+    }
+}
+function Invoke-RemoteAdminServiceAction([string]$Task) {
+    $row = $dgAdminServices.SelectedItem
+    if (-not $row) { Set-RemoteAdminStatus 'Select a service first.' '#F9E2AF'; return }
+    $transport = switch ($cmbAdminTransport.SelectedIndex) {
+        1 { 'HTTPS' }
+        2 { 'WMI/DCOM' }
+        default { 'HTTP' }
+    }
+    if ($script:RemoteAdminListHost -ne $txtAdminHost.Text.Trim() -or $script:RemoteAdminListTransport -ne $transport) {
+        Set-RemoteAdminStatus 'Reload the service list for the current computer and transport before running a service action.' '#F9E2AF'
+        return
+    }
+    if ($row.IsProcess) { Set-RemoteAdminStatus 'AnyDesk.exe is a process check and cannot be started or restarted as a service.' '#F9E2AF'; return }
+    if ($row.Name -ne 'Spooler' -and $row.Name -notlike 'TeamViewer*' -and $row.Name -notlike 'AnyDesk*') {
+        Set-RemoteAdminStatus 'That service is not in the allowed remote service list.' '#F38BA8'
+        return
+    }
+    $action = 'Start'; if ($Task -eq 'RestartService') { $action = 'Restart' }
+    $answer = [System.Windows.MessageBox]::Show("$action $($row.Display) on $($txtAdminHost.Text.Trim())?", 'Confirm remote service action', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    Start-RemoteAdminTask $Task ([string]$row.Name)
+}
+$btnDevRemoteAdmin.Add_Click({
+    $device = $dgDevices.SelectedItem
+    if (-not $device) { $txtDevStatus.Text = 'Select a device first.'; return }
+    $txtAdminHost.Text = Get-DeviceTarget $device
+    $script:RemoteAdminList.Clear()
+    $script:RemoteAdminListHost = ''
+    $script:RemoteAdminListTransport = ''
+    $pnlRemote.Visibility = 'Collapsed'
+    $pnlDiscover.Visibility = 'Collapsed'
+    $pnlRemoteAdmin.Visibility = 'Visible'
+    Set-RemoteAdminStatus 'HTTP requires an exact TrustedHosts entry; HTTPS requires a trusted matching certificate; WMI/DCOM requires TCP 135 and dynamic RPC access. Test readiness first.' '#6C7086'
+})
+$btnAdminCheck.Add_Click({ Start-RemoteAdminTask 'Check' '' })
+$btnAdminEnableRdp.Add_Click({
+    $answer = [System.Windows.MessageBox]::Show(
+        "Enable Remote Desktop and its firewall rules on $($txtAdminHost.Text.Trim())?`r`nThis changes the remote computer's registry and firewall configuration.",
+        'Confirm enabling Remote Desktop', 'YesNo', 'Warning')
+    if ($answer -eq 'Yes') { Start-RemoteAdminTask 'EnableRdp' '' }
+})
+$btnAdminEnableWinRm.Add_Click({
+    if ($cmbAdminTransport.SelectedIndex -ne 2) {
+        Set-RemoteAdminStatus 'Select WMI / DCOM before enabling WinRM; this action cannot bootstrap through WinRM.' '#F9E2AF'
+        return
+    }
+    $answer = [System.Windows.MessageBox]::Show(
+        "Run the fixed 'winrm quickconfig -force' setup on $($txtAdminHost.Text.Trim()) through WMI/DCOM?`r`n`r`nThis enables the WinRM service, creates an HTTP listener (normally port 5985), and configures the target firewall. Review the target's firewall policy afterward.",
+        'Confirm enabling WinRM',
+        'YesNo',
+        'Warning')
+    if ($answer -eq 'Yes') { Start-RemoteAdminTask 'EnableWinRM' '' }
+})
+$btnAdminLoadServices.Add_Click({ Start-RemoteAdminTask 'LoadServices' '' })
+$btnAdminStartService.Add_Click({ Invoke-RemoteAdminServiceAction 'StartService' })
+$btnAdminRestartService.Add_Click({ Invoke-RemoteAdminServiceAction 'RestartService' })
+$btnAdminClose.Add_Click({ $pnlRemoteAdmin.Visibility = 'Collapsed' })
+# ------------------------------------------------------------
 # DATABASE VERSION (header badge)
 # Reads Property_Id 22608 / 22609 / 22610 (Database Version / Full / Informational) from the EMBED properties table.
 # The table is found automatically: any table in a user database with Property_Id, Descriptor and Value columns.
@@ -3805,7 +4482,7 @@ $script:DbVerScript = {
         $b['Integrated Security']      = $true
         $b['TrustServerCertificate']   = $true
         $b['Connect Timeout']          = 5
-        $b['Application Name']         = "EMBED  Services Dashboard $script:AppVersion"
+        $b['Application Name']         = 'EMBED Services Dashboard'
         New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
     }
     try {
@@ -4169,6 +4846,36 @@ $btnDevSoftware.Add_Click({
     if ($dev) { $txtSwStation.Text = Get-RemoteHostFor $dev }
     $tabSoftware.IsSelected = $true
 })
+# ------------------------------------------------------------
+# DEVICES: click a device to expand its actions under the row
+# The action buttons inside the expanded row run the same code the old bottom-bar buttons did.
+# ------------------------------------------------------------
+$dgDevices.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler]{
+    param($sender, $e)
+    $btn = $e.OriginalSource
+    if (-not ($btn -is [System.Windows.Controls.Button])) { return }
+    $map = @{ 'Connect' = $btnDevConnect; 'Ping' = $btnDevPing; 'Services' = $btnDevServices; 'RemoteAdmin' = $btnDevRemoteAdmin; 'Software' = $btnDevSoftware; 'Remove' = $btnDevRemove }
+    $target = $map[[string]$btn.Tag]
+    if (-not $target) { return }
+    $dgDevices.SelectedItem = $btn.DataContext
+    $target.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+    $e.Handled = $true
+})
+# Clicking the row that is already open closes it again (clicks inside the expanded area are left alone)
+$dgDevices.Add_PreviewMouseLeftButtonDown({
+    $d = $_.OriginalSource
+    $row = $null
+    while ($d) {
+        if ($d -is [System.Windows.Controls.Primitives.DataGridDetailsPresenter]) { return }
+        if ($d -is [System.Windows.Controls.DataGridRow]) { $row = $d; break }
+        if ($d -is [System.Windows.Media.Visual]) { $d = [System.Windows.Media.VisualTreeHelper]::GetParent($d) }
+        else { $d = [System.Windows.LogicalTreeHelper]::GetParent($d) }
+    }
+    if ($row -and $row.IsSelected) {
+        $dgDevices.SelectedItem = $null
+        $_.Handled = $true
+    }
+})
 $txtSwRoot.Text = [string]$script:SoftwareConfig['StationRoot']
 # ------------------------------------------------------------
 # TIMERS (service refresh on Settings, device check on Devices)
@@ -4227,7 +4934,7 @@ $script:SqlScript = {
         $b['Integrated Security']    = $true
         $b['TrustServerCertificate'] = $true
         $b['Connect Timeout']        = 5
-        $b['Application Name']       = "EMBED Services Dashboard $($script:AppVersion)"
+        $b['Application Name']       = 'EMBED Services Dashboard'
         New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
     }
     function Get-Rows($conn, [string]$sql, [hashtable]$prm) {
@@ -4344,6 +5051,7 @@ function Start-SqlCheck {
 }
 function Set-SqlStatus([string]$text, [string]$hex) { $txtSqlStatus.Text = $text; $txtSqlStatus.Foreground = ColorBrush $hex }
 function Format-Size([double]$mb) { if ($mb -ge 1024) { '{0:N1} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
+
 function Format-Age($when) {
     if (-not $when) { return '' }
     $ts = (Get-Date) - [datetime]$when
@@ -4488,7 +5196,7 @@ $MainTabs.Add_SelectionChanged({
 })
 # ------------------------------------------------------------
 # READERS TAB (swiper units + reader units) - read-only
-# Swiper_Units -> Game_Swipers (Game_Id) -> Game_Master_List (Game_ML_Id) for the game name.
+# Swiper_Units -> Game_Swipers (Game_Id) for the description and retired flag (Game_Master_List for the game's retired flag).
 # Reader_Units is matched to its swiper unit by Swiper_Id + Location_Id.
 # Reader type: STP when Reader_Units.STP_Software_Hash has a value, otherwise STS.
 # ------------------------------------------------------------
@@ -4503,7 +5211,7 @@ $script:ReaderScript = {
         $b['Integrated Security']    = $true
         $b['TrustServerCertificate'] = $true
         $b['Connect Timeout']        = 5
-        $b['Application Name']       = "EMBED Services Dashboard $($script:AppVersion)"
+        $b['Application Name']       = 'EMBED Services Dashboard'
         New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
     }
     function Get-Rows($conn, [string]$sql) {
@@ -4517,10 +5225,10 @@ $script:ReaderScript = {
         }
     }
     $swiperSql = @"
-SELECT su.Swiper_Id, su.Location_Id, RTRIM(su.Game_Id) AS Game_Id, RTRIM(su.Polling_Group) AS Polling_Group,
+SELECT su.Swiper_Id, su.Location_Id, RTRIM(su.Game_Id) AS Game_Id,
        CAST(su.Status AS int) AS Status, CAST(su.Paused AS int) AS Paused, su.LastComms,
        RTRIM(gs.Swiper_Description) AS Swiper_Description, gs.Retired AS Swiper_Retired,
-       RTRIM(gml.Game_Name) AS Game_Name, gml.Retired AS Game_Retired
+       gml.Retired AS Game_Retired
 FROM dbo.Swiper_Units su
 OUTER APPLY (SELECT TOP 1 g.* FROM dbo.Game_Swipers g
              WHERE g.Game_Id = su.Game_Id
@@ -4529,7 +5237,6 @@ LEFT JOIN dbo.Game_Master_List gml ON gml.Game_ML_Id = gs.Game_ML_Id
 "@
     $readerSql = @"
 SELECT RTRIM(Reader_Id) AS Reader_Id, Swiper_Id, Location_Id, RTRIM(IPAddress) AS IPAddress,
-       RTRIM(Media_Version) AS Media_Version,
        CASE WHEN NULLIF(LTRIM(RTRIM(STP_Software_Hash)), '') IS NULL THEN 'STS' ELSE 'STP' END AS ReaderType
 FROM dbo.Reader_Units
 "@
@@ -4561,12 +5268,13 @@ FROM dbo.Reader_Units
     } finally { if ($cn) { $cn.Dispose() } }
     [PSCustomObject]$o
 }
-$script:ReaderJob     = $null
-$script:ReaderRows    = @()
-$script:ReaderInfo    = $null
+$script:ReaderJob      = $null
+$script:RdPingJob      = $null
+$script:ReaderRows     = @()
+$script:ReaderInfo     = $null
 $script:LastReaderLoad = [datetime]::MinValue
-$script:ReaderType    = 'All'
-$script:ReaderList    = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$script:ReaderType     = 'All'
+$script:ReaderList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
 $dgReaders.ItemsSource = $script:ReaderList
 function Set-RdStatus([string]$text, [string]$hex) { $txtRdStatus.Text = $text; $txtRdStatus.Foreground = ColorBrush $hex }
 function Start-ReaderLoad {
@@ -4611,48 +5319,73 @@ function Complete-ReaderLoad {
         $retired = ($null -ne $s.Swiper_Retired) -or ($null -ne $s.Game_Retired)
         $rows += [PSCustomObject]@{
             Type        = $(if ($rd) { [string]$rd.ReaderType } else { '—' })
-            GameName    = [string]$s.Game_Name
             Description = [string]$s.Swiper_Description
             GameId      = [string]$s.Game_Id
-            SwiperId    = [string]$s.Swiper_Id
             ReaderId    = $(if ($rd) { [string]$rd.Reader_Id } else { '' })
             Ip          = $(if ($rd) { [string]$rd.IPAddress } else { '' })
-            PollGroup   = [string]$s.Polling_Group
             Paused      = $(if ([int]$s.Paused -eq 1) { 'Yes' } else { 'No' })
-            Status      = [string]$s.Status
+            Online      = $(if ($rd -and ([string]$rd.IPAddress).Trim()) { 'Checking...' } else { '' })
             LastComms   = $(if ($s.LastComms) { ([datetime]$s.LastComms).ToString('yyyy-MM-dd HH:mm') } else { '' })
-            MediaVer    = $(if ($rd) { [string]$rd.Media_Version } else { '' })
             Retired     = $retired
             IsSwiper    = $true
         }
     }
-    # Readers that are not attached to any swiper unit still show up
-    foreach ($rd in @($r.Readers)) {
-        if ($used.ContainsKey("$($rd.Swiper_Id)|$($rd.Location_Id)")) { continue }
-        $rows += [PSCustomObject]@{
-            Type = [string]$rd.ReaderType; GameName = '(no swiper unit)'; Description = ''; GameId = ''
-            SwiperId = [string]$rd.Swiper_Id; ReaderId = [string]$rd.Reader_Id; Ip = [string]$rd.IPAddress
-            PollGroup = ''; Paused = ''; Status = ''; LastComms = ''; MediaVer = [string]$rd.Media_Version
-            Retired = $false; IsSwiper = $false
-        }
-    }
-    $script:ReaderRows = @($rows | Sort-Object GameName, Description)
+    # Readers not attached to any swiper unit are old readers - leave them out of the list and the counts
+    $orphans = @($r.Readers | Where-Object { -not $used.ContainsKey("$($_.Swiper_Id)|$($_.Location_Id)") }).Count
+    $script:ReaderRows = @($rows | Sort-Object Description, GameId)
 
     # Hard counts (retired swiper units left out)
     $active   = @($rows | Where-Object { $_.IsSwiper -and -not $_.Retired })
     $retiredN = @($rows | Where-Object { $_.IsSwiper -and $_.Retired }).Count
-    $readers  = @($r.Readers)
+    $readers  = @($r.Readers | Where-Object { $used.ContainsKey("$($_.Swiper_Id)|$($_.Location_Id)") })
     $txtRdSwipers.Text    = [string]$active.Count
     $txtRdSwipersSub.Text = if ($retiredN -gt 0) { "active  ($retiredN retired not counted)" } else { 'active' }
     $txtRdReaders.Text    = [string]$readers.Count
-    $noSwiper = @($rows | Where-Object { -not $_.IsSwiper }).Count
-    $txtRdReadersSub.Text = if ($noSwiper -gt 0) { "$noSwiper not linked to a swiper unit" } else { 'all linked to a swiper unit' }
+    $txtRdReadersSub.Text = 'pinging...'
     $txtRdSts.Text    = [string]@($readers | Where-Object { $_.ReaderType -eq 'STS' }).Count
     $txtRdStp.Text    = [string]@($readers | Where-Object { $_.ReaderType -eq 'STP' }).Count
     $txtRdPaused.Text = [string]@($active | Where-Object { $_.Paused -eq 'Yes' }).Count
 
     Update-ReaderList
-    Set-RdStatus ("Loaded from {0} on {1} at {2}." -f $r.Database, $script:GuruSqlServer, (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
+    $hidden = if ($orphans -gt 0) { "  $orphans old reader(s) with no swiper unit hidden." } else { '' }
+    Set-RdStatus ("Loaded from {0} on {1} at {2}.{3}" -f $r.Database, $script:GuruSqlServer, (Get-Date).ToString('HH:mm:ss'), $hidden) '#A6E3A1'
+    Start-ReaderPing
+}
+# Pings every reader IP once (same ping job as the Access Points tab) and fills the Online column
+function Start-ReaderPing {
+    if ($script:RdPingJob) { return }
+    $ips = @($script:ReaderRows | ForEach-Object { ([string]$_.Ip).Trim() } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique)
+    if ($ips.Count -eq 0) { $txtRdReadersSub.Text = 'no reader IPs to ping'; return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:ApScript.ToString()).AddArgument([string[]]$ips).AddArgument($false)
+        $script:RdPingJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+    } catch {
+        $script:RdPingJob = $null
+        $txtRdReadersSub.Text = 'ping could not start'
+    }
+}
+function Complete-ReaderPing {
+    $job = $script:RdPingJob
+    $script:RdPingJob = $null
+    $res = @()
+    try     { $res = @($job.PS.EndInvoke($job.Handle)) }
+    catch   { $txtRdReadersSub.Text = 'ping failed'; return }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    $map = @{}; foreach ($x in $res) { if ($x) { $map[[string]$x.Ip] = $x } }
+    $on = 0; $off = 0
+    foreach ($row in $script:ReaderRows) {
+        $ip = ([string]$row.Ip).Trim()
+        if (-not $ip) { continue }
+        $p = $map[$ip]
+        if     ($p -and $p.Ok) { $row.Online = 'Online' }
+        elseif ($p)            { $row.Online = 'No reply' }
+        else                   { $row.Online = 'Bad IP' }
+        if (-not $row.Retired) { if ($row.Online -eq 'Online') { $on++ } else { $off++ } }
+    }
+    $txtRdReadersSub.Text = "$on online  ·  $off no reply"
+    Update-ReaderList
 }
 function Update-ReaderList {
     $q   = $txtRdSearch.Text.Trim()
@@ -4662,7 +5395,7 @@ function Update-ReaderList {
         if ($x.Retired -and -not $ret) { continue }
         if ($script:ReaderType -ne 'All' -and $x.Type -ne $script:ReaderType) { continue }
         if ($q) {
-            $hay = "$($x.GameName) $($x.Description) $($x.GameId) $($x.SwiperId) $($x.ReaderId) $($x.Ip)"
+            $hay = "$($x.Description) $($x.GameId) $($x.ReaderId) $($x.Ip)"
             if ($hay.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
         }
         $script:ReaderList.Add($x)
@@ -4683,10 +5416,10 @@ function Get-ReaderTabText {
         "Server: $env:COMPUTERNAME   Database: $($r.Database) on $($script:GuruSqlServer)",
         "Swiper units: $($txtRdSwipers.Text) ($($txtRdSwipersSub.Text))   Reader units: $($txtRdReaders.Text)   STS: $($txtRdSts.Text)   STP: $($txtRdStp.Text)   Paused: $($txtRdPaused.Text)",
         "",
-        (@('Type','Game name','Description','Game Id','Swiper','Reader Id','IP','Poll grp','Paused','Status','Last comms','Media ver.') -join "`t")
+        (@('Type','Description','Game Id','Reader Id','IP','Paused','Online','Last comms') -join "`t")
     )
     foreach ($x in $script:ReaderList) {
-        $lines += (@($x.Type, $x.GameName, $x.Description, $x.GameId, $x.SwiperId, $x.ReaderId, $x.Ip, $x.PollGroup, $x.Paused, $x.Status, $x.LastComms, $x.MediaVer) -join "`t")
+        $lines += (@($x.Type, $x.Description, $x.GameId, $x.ReaderId, $x.Ip, $x.Paused, $x.Online, $x.LastComms) -join "`t")
     }
     $lines -join "`r`n"
 }
@@ -4701,6 +5434,236 @@ $btnRdAll.Add_Click({ Set-ReaderType 'All' })
 $btnRdSts.Add_Click({ Set-ReaderType 'STS' })
 $btnRdStp.Add_Click({ Set-ReaderType 'STP' })
 # ------------------------------------------------------------
+# ACCESS POINTS TAB (ping-based)
+# Rescan Range pings every address in the AP range; the timer re-pings the APs already found.
+# APs found before are remembered (config.json), so one that is down shows as Offline instead of disappearing.
+# ------------------------------------------------------------
+$dgAps.ItemsSource = $script:ApList
+$script:ApScript = {
+    param($ips, $lookupNames)
+    $probes = @()
+    foreach ($ip in $ips) {
+        $p = @{ Ip = $ip; Task = $null }
+        try { $p.Task = (New-Object System.Net.NetworkInformation.Ping).SendPingAsync($ip, 1500) } catch {}
+        $probes += $p
+    }
+    $tasks = @($probes | Where-Object { $_.Task } | ForEach-Object { $_.Task })
+    if ($tasks.Count -gt 0) { try { [void][System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]$tasks, 4000) } catch {} }
+    $out = @()
+    foreach ($p in $probes) {
+        $ok = $false; $ms = $null
+        if ($p.Task -and $p.Task.Status -eq 'RanToCompletion' -and $p.Task.Result.Status -eq 'Success') { $ok = $true; $ms = [int]$p.Task.Result.RoundtripTime }
+        $out += @{ Ip = $p.Ip; Ok = $ok; Ms = $ms; Name = '' }
+    }
+    if ($lookupNames) {
+        $dns = @{}
+        foreach ($o in $out) { if ($o.Ok) { try { $dns[$o.Ip] = [System.Net.Dns]::GetHostEntryAsync($o.Ip) } catch {} } }
+        if ($dns.Count -gt 0) { try { [void][System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($dns.Values), 3000) } catch {} }
+        foreach ($o in $out) {
+            $t = $dns[$o.Ip]
+            if ($t -and $t.Status -eq 'RanToCompletion') { $hn = [string]$t.Result.HostName; if ($hn -and $hn -ne $o.Ip) { $o.Name = $hn } }
+        }
+    }
+    foreach ($o in $out) { [PSCustomObject]$o }
+}
+function ConvertTo-IpNumber([string]$ip) {
+    $a = $null
+    if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$a) -or $a.AddressFamily -ne 'InterNetwork') { return $null }
+    $b = $a.GetAddressBytes()
+    return ([long]$b[0] -shl 24) -bor ([long]$b[1] -shl 16) -bor ([long]$b[2] -shl 8) -bor [long]$b[3]
+}
+function ConvertFrom-IpNumber([long]$n) { '{0}.{1}.{2}.{3}' -f (($n -shr 24) -band 255), (($n -shr 16) -band 255), (($n -shr 8) -band 255), ($n -band 255) }
+function Get-ApRangeIps {
+    $a = ConvertTo-IpNumber $script:ApConfig['RangeStart']; $b = ConvertTo-IpNumber $script:ApConfig['RangeEnd']
+    if ($null -eq $a -or $null -eq $b -or $b -lt $a) { return @() }
+    $list = @(); for ($n = $a; $n -le $b; $n++) { $list += (ConvertFrom-IpNumber $n) }
+    return $list
+}
+function Set-ApStatus([string]$text, [string]$hex) { $txtApStatus.Text = $text; $txtApStatus.Foreground = ColorBrush $hex }
+function Start-ApJob([bool]$FullScan) {
+    if ($script:ApJob) { return }
+    $ips = @($script:ApList | ForEach-Object { [string]$_.Ip })
+    if ($FullScan) { $ips = @(@(Get-ApRangeIps) + $ips | Select-Object -Unique) }
+    if ($ips.Count -eq 0) { Set-ApStatus 'Nothing to ping yet - click Rescan Range.' '#F9E2AF'; return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:ApScript.ToString()).AddArgument([string[]]$ips).AddArgument($FullScan)
+        $script:ApJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Full = $FullScan }
+        $btnApScan.IsEnabled = $false; $btnApPing.IsEnabled = $false
+        if ($FullScan) { Set-ApStatus ("Scanning {0} - {1} ({2} addresses)..." -f $script:ApConfig['RangeStart'], $script:ApConfig['RangeEnd'], $ips.Count) '#89B4FA' }
+    } catch {
+        $script:ApJob = $null
+        $btnApScan.IsEnabled = $true; $btnApPing.IsEnabled = $true
+        Set-ApStatus "Could not start: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-ApJob {
+    $job = $script:ApJob
+    $script:ApJob = $null
+    $btnApScan.IsEnabled = $true; $btnApPing.IsEnabled = $true
+    $res = @()
+    try     { $res = @($job.PS.EndInvoke($job.Handle)) }
+    catch   { Set-ApStatus "Ping failed: $($_.Exception.Message)" '#F38BA8'; return }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    $now = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $byIp = @{}; foreach ($a in $script:ApList) { $byIp[[string]$a.Ip] = $a }
+    $added = 0; $needSave = $false
+    foreach ($r in $res) {
+        $ap = $byIp[[string]$r.Ip]
+        if (-not $ap) {
+            if (-not $r.Ok) { continue }                               # empty address in the range
+            $ap = New-ApObject ([string]$r.Ip) ([string]$r.Name) $now
+            $script:ApList.Add($ap); $byIp[[string]$r.Ip] = $ap
+            $added++; $needSave = $true
+            if ($job.Full -and $script:ApScanned) { Add-HistoryEntry -ServiceName "AP $($r.Ip)" -Group 'Access Point' -OldStatus '' -NewStatus 'Found' -Note 'New AP answered in the range scan' }
+        }
+        if ($r.Name -and -not $ap.Name) { $ap.Name = [string]$r.Name; $needSave = $true }
+        $new = 'Offline'; if ($r.Ok) { $new = 'Online' }
+        if ($ap.Status -ne $new) {
+            if ($ap.Status -in @('Online', 'Offline')) {
+                $label = [string]$ap.Ip; if ($ap.Name) { $label += " ($($ap.Name))" }
+                Add-HistoryEntry -ServiceName "AP $label" -Group 'Access Point' -OldStatus $ap.Status -NewStatus $new -Note ''
+            }
+            $ap.Status = $new
+            $ap.Since  = $now
+        }
+        if ($r.Ok) { $ap.Ms = "$($r.Ms) ms"; $ap.LastSeen = $now } else { $ap.Ms = '' }
+    }
+    if ($job.Full) { $script:ApScanned = $true }
+    $dgAps.Items.Refresh()
+    Update-ApCounts
+    if ($needSave) { Save-AllConfig }
+    $when = (Get-Date).ToString('HH:mm:ss')
+    if ($job.Full) { Set-ApStatus ("Range scanned at {0}. {1} AP(s) found, {2} new." -f $when, $script:ApList.Count, $added) '#A6E3A1' }
+    else           { Set-ApStatus ("Pinged at {0}. Next ping in {1}." -f $when, (Format-Countdown $script:ApConfig['PingSecs'])) '#A6E3A1' }
+}
+function Update-ApCounts {
+    $txtApTotal.Text   = [string]$script:ApList.Count
+    $txtApOnline.Text  = [string]@($script:ApList | Where-Object { $_.Status -eq 'Online' }).Count
+    $txtApOffline.Text = [string]@($script:ApList | Where-Object { $_.Status -eq 'Offline' }).Count
+    $txtApRange.Text   = "range $($script:ApConfig['RangeStart']) - $($script:ApConfig['RangeEnd'])"
+}
+function Initialize-ApUi {
+    $txtApFrom.Text  = [string]$script:ApConfig['RangeStart']
+    $txtApTo.Text    = [string]$script:ApConfig['RangeEnd']
+    $txtApEvery.Text = [string]$script:ApConfig['PingSecs']
+    $txtApUrl.Text   = [string]$script:ApConfig['UnifiUrl']
+    Update-ApCounts
+}
+$btnApSave.Add_Click({
+    $f = $txtApFrom.Text.Trim(); $t = $txtApTo.Text.Trim(); $v = 0; $u = $txtApUrl.Text.Trim()
+    $a = ConvertTo-IpNumber $f; $b = ConvertTo-IpNumber $t
+    if ($null -eq $a -or $null -eq $b) { Set-ApStatus 'Range: enter two IPv4 addresses, e.g. 10.10.8.2 and 10.10.8.254.' '#F38BA8'; return }
+    if ($b -lt $a)        { Set-ApStatus 'Range: the second address must be after the first.' '#F38BA8'; return }
+    if (($b - $a) -ge 1024) { Set-ApStatus 'Range: 1024 addresses at most.' '#F38BA8'; return }
+    if (-not [int]::TryParse($txtApEvery.Text.Trim(), [ref]$v) -or $v -lt 15 -or $v -gt 3600) { Set-ApStatus 'Ping every: 15 to 3600 seconds.' '#F38BA8'; return }
+    if ($u -and $u -notmatch '^https?://[^\s"]+$') { Set-ApStatus 'UniFi address must start with https:// or http://' '#F38BA8'; return }
+    $changed = ($f -ne $script:ApConfig['RangeStart'] -or $t -ne $script:ApConfig['RangeEnd'])
+    $script:ApConfig['RangeStart'] = $f; $script:ApConfig['RangeEnd'] = $t
+    $script:ApConfig['PingSecs'] = $v; $script:ApConfig['UnifiUrl'] = $u
+    $script:ApCountdown = $v
+    Save-AllConfig
+    Initialize-ApUi
+    Set-ApStatus ("Saved at {0}." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
+    if ($changed) { Start-ApJob $true }
+})
+$btnApScan.Add_Click({ Start-ApJob $true })
+$btnApPing.Add_Click({ $script:ApCountdown = [int]$script:ApConfig['PingSecs']; Start-ApJob $false })
+# Open UniFi: start the UniFi Network app on this server if it is not running, wait until it answers,
+# then open the UniFi address. Waiting runs in the background so the dashboard does not freeze.
+$script:UnifiJob = $null
+function Get-UnifiPort([string]$Url) {
+    $port = 8443   # UniFi Network default
+    try {
+        $x = [uri]$Url
+        if ($x.Host -in @('localhost', '127.0.0.1', $env:COMPUTERNAME) -and -not $x.IsDefaultPort) { $port = $x.Port }
+    } catch {}
+    return $port
+}
+function Test-UnifiUp([int]$Port) {
+    $tc = New-Object System.Net.Sockets.TcpClient
+    try { $t = $tc.ConnectAsync('127.0.0.1', $Port); return ($t.Wait(1000) -and $tc.Connected) } catch { return $false } finally { $tc.Close() }
+}
+# Returns 'service', 'app' or '' (not found)
+function Start-UnifiApp {
+    $svc = Get-Service -Name 'UniFi' -ErrorAction SilentlyContinue      # installed as a Windows service
+    if ($svc) { if ($svc.Status -ne 'Running') { Start-Service -Name 'UniFi' -ErrorAction Stop }; return 'service' }
+    $dirs = @("$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+              [Environment]::GetFolderPath('CommonDesktopDirectory'), [Environment]::GetFolderPath('Desktop'))
+    $lnk = $dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+           ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter 'UniFi*.lnk' -Recurse -Depth 2 -ErrorAction SilentlyContinue } |
+           Select-Object -First 1
+    if ($lnk) { Start-Process -FilePath $lnk.FullName; return 'app' }
+    return ''
+}
+$script:UnifiWaitScript = {
+    param($port, $secs)
+    $end = (Get-Date).AddSeconds($secs)
+    while ((Get-Date) -lt $end) {
+        $tc = New-Object System.Net.Sockets.TcpClient
+        try { $t = $tc.ConnectAsync('127.0.0.1', $port); if ($t.Wait(1000) -and $tc.Connected) { return $true } } catch {} finally { $tc.Close() }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+$btnApUnifi.Add_Click({
+    $u = [string]$script:ApConfig['UnifiUrl']
+    if (-not $u) { Set-ApStatus 'Enter the UniFi address below and click Save first.' '#F9E2AF'; return }
+    if ($script:UnifiJob) { Set-ApStatus 'Still waiting for UniFi to start...' '#89B4FA'; return }
+    $port = Get-UnifiPort $u
+    if (Test-UnifiUp $port) { Start-Process $u; Set-ApStatus 'UniFi is running - opened it in your browser.' '#A6E3A1'; return }
+    $how = ''
+    try { $how = Start-UnifiApp } catch { Set-ApStatus "Could not start UniFi: $($_.Exception.Message)" '#F38BA8'; return }
+    if (-not $how) { Start-Process $u; Set-ApStatus 'UniFi app not found on this server - opened the address only.' '#F9E2AF'; return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:UnifiWaitScript.ToString()).AddArgument($port).AddArgument(120)
+        $script:UnifiJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Url = $u }
+        Set-ApStatus 'Starting the UniFi app - your browser opens when it is ready (up to 2 minutes)...' '#89B4FA'
+    } catch {
+        $script:UnifiJob = $null
+        Start-Process $u
+        Set-ApStatus "Started UniFi but could not wait for it: $($_.Exception.Message)" '#F9E2AF'
+    }
+})
+function Complete-UnifiWait {
+    $job = $script:UnifiJob
+    $script:UnifiJob = $null
+    $ok = $false
+    try     { $ok = [bool](@($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1) } catch {}
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if ($ok) { Start-Process $job.Url; Set-ApStatus 'UniFi started - opened it in your browser.' '#A6E3A1' }
+    else     { Set-ApStatus 'UniFi did not answer within 2 minutes. Check the UniFi window on this server, then click Open UniFi again.' '#F38BA8' }
+}
+$btnApPingWin.Add_Click({
+    $ap = $dgAps.SelectedItem
+    if (-not $ap) { Set-ApStatus 'Select an AP first.' '#F9E2AF'; return }
+    Start-Process -FilePath 'cmd.exe' -ArgumentList "/k ping -t $($ap.Ip)"
+})
+$btnApForget.Add_Click({
+    $ap = $dgAps.SelectedItem
+    if (-not $ap) { Set-ApStatus 'Select an AP first.' '#F9E2AF'; return }
+    $ans = [System.Windows.MessageBox]::Show("Forget AP $($ap.Ip)?`r`nIt will come back if it answers the next range scan.", 'Forget AP', 'YesNo', 'Question')
+    if ($ans -ne 'Yes') { return }
+    [void]$script:ApList.Remove($ap)
+    Save-AllConfig
+    Update-ApCounts
+    Set-ApStatus "Forgot $($ap.Ip)." '#6C7086'
+})
+$btnApCopy.Add_Click({
+    $lines = @(
+        "Server: $env:COMPUTERNAME   AP range: $($script:ApConfig['RangeStart']) - $($script:ApConfig['RangeEnd'])",
+        "Access points: $($txtApTotal.Text)   Online: $($txtApOnline.Text)   Offline: $($txtApOffline.Text)",
+        "",
+        (@('Status', 'IP', 'Name', 'Ping', 'Last seen', 'Since') -join "`t")
+    )
+    foreach ($a in @($script:ApList | Sort-Object SortKey)) { $lines += (@($a.Status, $a.Ip, $a.Name, $a.Ms, $a.LastSeen, $a.Since) -join "`t") }
+    try { [System.Windows.Clipboard]::SetText(($lines -join "`r`n")); Set-ApStatus 'AP list copied to clipboard (pastes into Excel).' '#A6E3A1' }
+    catch { Set-ApStatus "Copy failed: $($_.Exception.Message)" '#F38BA8' }
+})
+# ------------------------------------------------------------
 # TIMER
 # ------------------------------------------------------------
 $script:Timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -4711,9 +5674,19 @@ $script:Timer.Add_Tick({
     if ($script:UpdateScan -and $script:UpdateScan.Handle.IsCompleted) { Complete-UpdateCheck }
     if ($script:SnapshotJob -and $script:SnapshotJob.Handle.IsCompleted) { Complete-Snapshot }
     if ($script:RemoteJob   -and $script:RemoteJob.Handle.IsCompleted)   { Complete-RemoteJob }
+    if ($script:RemoteAdminJob -and $script:RemoteAdminJob.Handle.IsCompleted) { Complete-RemoteAdminTask }
     if ($script:DbVerJob    -and $script:DbVerJob.Handle.IsCompleted)    { Complete-DbVersionCheck }
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
     if ($script:ReaderJob   -and $script:ReaderJob.Handle.IsCompleted)   { Complete-ReaderLoad }
+    if ($script:RdPingJob   -and $script:RdPingJob.Handle.IsCompleted)   { Complete-ReaderPing }
+    if ($script:RdpJob      -and $script:RdpJob.Handle.IsCompleted)      { Complete-RdpConnect }
+    if ($script:UnifiJob    -and $script:UnifiJob.Handle.IsCompleted)    { Complete-UnifiWait }
+    if ($script:ApJob       -and $script:ApJob.Handle.IsCompleted)       { Complete-ApJob }
+    $script:ApCountdown--
+    if ($script:ApCountdown -le 0) {
+        $script:ApCountdown = [int]$script:ApConfig['PingSecs']
+        if ($script:ApList.Count -gt 0) { Start-ApJob $false }
+    }
     $swLine = $null; $swAny = $false
     while ($script:SwLog.TryDequeue([ref]$swLine)) { $txtSwLog.AppendText($swLine + "`r`n"); $swAny = $true }
     if ($swAny) { $txtSwLog.ScrollToEnd() }
@@ -4764,6 +5737,8 @@ $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
 Initialize-SnapshotUi
 Initialize-TimerUi
 Start-DbVersionCheck
+Initialize-ApUi
+if ($script:ApList.Count -gt 0) { Start-ApJob $false } else { Start-ApJob $true }   # first run finds the APs
 [void](Remove-OldSnapshots)
 Remove-OldHistoryLogs
 $script:Timer.Start()
