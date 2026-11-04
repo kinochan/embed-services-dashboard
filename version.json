@@ -1,8 +1,8 @@
 {
-   "version": "2.22.5",
-   "notes": "Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and verification.",
+   "version": "2.22.6",
+   "notes": "Makes the ECS7 log shrink target and backup directory configurable in Settings.",
    "file": "EMBED_Services_Dashboard.ps1",
-   "sha256": "5e7a4ed82af278a3340b4d2cff00d87ff1225009b1ffd6f08f358c4214c73355",
+   "sha256": "f7da7758ede7623032f68eb1844747b654fe67d7f7b6c83c6cfd5ae6309b2adc",
    "exeAsset": "EMBED_Services_Dashboard.exe",
-   "releaseTag": "v2.22.5"
+   "releaseTag": "v2.22.6"
 }

@@ -22,6 +22,7 @@ v2.22.1: Supports HTTP WinRM with an exact TrustedHosts entry as well as HTTPS.
 v2.22.2: Adds WMI/DCOM as an alternative transport for fixed remote-admin tasks.
 v2.22.3: Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.
 v2.22.5: Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and verification.
+v2.22.6: Makes the ECS7 log shrink target and backup directory configurable in Settings.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -38,7 +39,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.22.5'
+$script:AppVersion = '2.22.6'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -88,6 +89,7 @@ $script:DeviceSecs     = 60     # device check (Devices tab, saved)
 $script:DeviceCountdown = 60
 $script:SqlJob         = $null  # background SQL tab check
 $script:SqlMaintenanceJob = $null
+$script:SqlMaintenanceConfig = @{ ShrinkTargetMB = 150; BackupDirectory = 'E:\SQL\BACKUP' }
 $script:SqlInfo        = $null
 $script:LastSqlCheck   = [datetime]::MinValue
 $script:SqlCheckHours  = 24
@@ -208,6 +210,7 @@ function Save-Config {
             AutoAddDiscovered = [bool]$script:AutoAddDiscovered
             Update           = $script:UpdateConfig
             SqlServer        = $script:GuruSqlServer
+            SqlMaintenance   = $script:SqlMaintenanceConfig
             Snapshot         = $script:SnapshotConfig
             Software         = @{
                 StationRoot = $script:SoftwareConfig['StationRoot']
@@ -761,7 +764,7 @@ function Save-Config {
                   <TextBlock x:Name="txtSqlFiles" Foreground="#6C7086" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
                                     <Border Height="1" Background="#45475A" Margin="0,12,0,10"/>
                                     <TextBlock Text="LOG FILE MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,6"/>
-                                    <TextBlock Text="Backs up ECS7 to E:\SQL\BACKUP\ECS7_Log.trn, shrinks ECS7_log to 150 MB, then sets 64 MB growth and a 10,240 MB maximum. The path is on the SQL Server host." Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                    <TextBlock x:Name="txtSqlMaintenancePlan" Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto"/>
@@ -1300,6 +1303,31 @@ function Save-Config {
                 </Grid>
               </StackPanel>
             </Border>
+                        <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="SQL LOG MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                <TextBlock Text="The backup directory is on the SQL Server host. The dashboard writes ECS7_Log.trn inside it; the shrink target is in MB."
+                                                     Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="210"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="Shrink target (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlShrinkTarget" Grid.Row="0" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
+                                    <TextBlock Grid.Row="1" Text="Backup directory (SQL Server)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlBackupDirectory" Grid.Row="1" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="Absolute drive path or UNC directory on the SQL Server host"/>
+                                </Grid>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <Button x:Name="btnSqlMaintenanceSave" Content="Save Log Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
+                                    <TextBlock x:Name="txtSqlMaintenanceSettingsStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
             <Border Background="#313244" CornerRadius="8" Padding="18">
               <StackPanel>
                 <TextBlock Text="EMAIL ALERTS (SMTP)" Foreground="#CBA6F7" FontSize="11"
@@ -1578,6 +1606,10 @@ $txtSqlServer     = Get-Ctrl 'txtSqlServer'
 $btnSnapSave      = Get-Ctrl 'btnSnapSave'
 $btnSnapOpen      = Get-Ctrl 'btnSnapOpen'
 $txtSnapStatus    = Get-Ctrl 'txtSnapStatus'
+$txtSqlShrinkTarget = Get-Ctrl 'txtSqlShrinkTarget'
+$txtSqlBackupDirectory = Get-Ctrl 'txtSqlBackupDirectory'
+$btnSqlMaintenanceSave = Get-Ctrl 'btnSqlMaintenanceSave'
+$txtSqlMaintenanceSettingsStatus = Get-Ctrl 'txtSqlMaintenanceSettingsStatus'
 $dbBadge          = Get-Ctrl 'dbBadge'
 $tabSoftware      = Get-Ctrl 'tabSoftware'
 $txtSwStation     = Get-Ctrl 'txtSwStation'
@@ -1606,6 +1638,7 @@ $btnSqlCopy       = Get-Ctrl 'btnSqlCopy'
 $btnSqlRefresh    = Get-Ctrl 'btnSqlRefresh'
 $btnSqlMaintenance = Get-Ctrl 'btnSqlMaintenance'
 $txtSqlMaintenanceStatus = Get-Ctrl 'txtSqlMaintenanceStatus'
+$txtSqlMaintenancePlan = Get-Ctrl 'txtSqlMaintenancePlan'
 $txtSqlDbFull     = Get-Ctrl 'txtSqlDbFull'
 $txtSqlDbSub      = Get-Ctrl 'txtSqlDbSub'
 $dotBkFull        = Get-Ctrl 'dotBkFull'
@@ -2937,6 +2970,23 @@ if ($ig -and $ig.Value) {
 }
 $sq = $config.PSObject.Properties['SqlServer']
 if ($sq -and $sq.Value) { $script:GuruSqlServer = [string]$sq.Value }
+$lm = $config.PSObject.Properties['SqlMaintenance']
+if ($lm -and $lm.Value) {
+    $targetSetting = $lm.Value.PSObject.Properties['ShrinkTargetMB']
+    if ($targetSetting) {
+        $targetValue = 0
+        if ([int]::TryParse([string]$targetSetting.Value, [ref]$targetValue) -and $targetValue -ge 1 -and $targetValue -le 10240) {
+            $script:SqlMaintenanceConfig['ShrinkTargetMB'] = $targetValue
+        }
+    }
+    $directorySetting = $lm.Value.PSObject.Properties['BackupDirectory']
+    if ($directorySetting) {
+        $directoryValue = ([string]$directorySetting.Value).Trim()
+        if ($directoryValue -match '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') {
+            $script:SqlMaintenanceConfig['BackupDirectory'] = $directoryValue.TrimEnd('\')
+        }
+    }
+}
 $sn = $config.PSObject.Properties['Snapshot']
 if ($sn -and $sn.Value) {
     foreach ($k in @($script:SnapshotConfig.Keys)) {
@@ -3603,6 +3653,39 @@ function Initialize-SnapshotUi {
     $txtSnapDays.Text  = [string]$script:SnapshotConfig['MaxAgeDays']
     $txtSqlServer.Text = [string]$script:GuruSqlServer
 }
+function Update-SqlMaintenancePlan {
+    $directory = ([string]$script:SqlMaintenanceConfig['BackupDirectory']).TrimEnd('\')
+    $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
+    $txtSqlMaintenancePlan.Text = "Backs up ECS7 to $directory\ECS7_Log.trn, shrinks ECS7_log to $target MB, then sets 64 MB growth and a 10,240 MB maximum."
+}
+function Initialize-SqlMaintenanceUi {
+    $txtSqlShrinkTarget.Text = [string]$script:SqlMaintenanceConfig['ShrinkTargetMB']
+    $txtSqlBackupDirectory.Text = [string]$script:SqlMaintenanceConfig['BackupDirectory']
+    Update-SqlMaintenancePlan
+}
+function Set-SqlMaintenanceSettingsStatus([string]$text, [string]$hex) {
+    $txtSqlMaintenanceSettingsStatus.Text = $text
+    $txtSqlMaintenanceSettingsStatus.Foreground = ColorBrush $hex
+}
+$btnSqlMaintenanceSave.Add_Click({
+    $target = 0
+    if (-not [int]::TryParse($txtSqlShrinkTarget.Text.Trim(), [ref]$target) -or $target -lt 1 -or $target -gt 10240) {
+        Set-SqlMaintenanceSettingsStatus 'Shrink target must be a whole number from 1 to 10240 MB.' '#F38BA8'
+        return
+    }
+    $directory = $txtSqlBackupDirectory.Text.Trim().TrimEnd('\')
+    $isDrivePath = $directory -match '^[A-Za-z]:\\'
+    $isUncPath = $directory -match '^\\\\[^\\]+\\[^\\]+'
+    if (-not ($isDrivePath -or $isUncPath) -or $directory -match '[\r\n]') {
+        Set-SqlMaintenanceSettingsStatus 'Enter an absolute drive or UNC directory on the SQL Server host.' '#F38BA8'
+        return
+    }
+    $script:SqlMaintenanceConfig['ShrinkTargetMB'] = $target
+    $script:SqlMaintenanceConfig['BackupDirectory'] = $directory
+    Save-AllConfig
+    Update-SqlMaintenancePlan
+    Set-SqlMaintenanceSettingsStatus ("Saved at {0}. Backup file: ECS7_Log.trn." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
+})
 $btnSnapshot.Add_Click({ Start-Snapshot })
 $btnSnapSave.Add_Click({
     $k = 0; $dd = 0
@@ -4997,9 +5080,10 @@ $script:SqlScript = {
     [PSCustomObject]$o
 }
 $script:SqlMaintenanceScript = {
-    param($sqlServer)
+    param($sqlServer, [int]$shrinkTargetMb, [string]$backupDirectory)
+    $backupPath = $backupDirectory.TrimEnd('\') + '\ECS7_Log.trn'
     $o = [ordered]@{
-        Ok = $false; Stage = 'Connect'; Error = ''; BackupPath = 'E:\SQL\BACKUP\ECS7_Log.trn'
+        Ok = $false; Stage = 'Connect'; Error = ''; BackupPath = $backupPath; ShrinkTargetMB = $shrinkTargetMb
         BackupCompleted = $false; ShrinkCompleted = $false; GrowthConfigured = $false
         ShrinkTargetReached = $false; SizeMB = 0.0; LogReuseWait = ''
     }
@@ -5054,11 +5138,12 @@ $script:SqlMaintenanceScript = {
         } finally { $cmd.Dispose() }
 
         $o.Stage = 'Log backup'
-        Invoke-NonQuery $cn "BACKUP LOG [ECS7] TO DISK = N'E:\SQL\BACKUP\ECS7_Log.trn';"
+        $escapedBackupPath = $backupPath.Replace("'", "''")
+        Invoke-NonQuery $cn "BACKUP LOG [ECS7] TO DISK = N'$escapedBackupPath';"
         $o.BackupCompleted = $true
 
         $o.Stage = 'Shrink'
-        Invoke-NonQuery $cn 'DBCC SHRINKFILE (N''ECS7_log'', 150);'
+        Invoke-NonQuery $cn ("DBCC SHRINKFILE (N'ECS7_log', {0});" -f $shrinkTargetMb)
         $o.ShrinkCompleted = $true
 
         $o.Stage = 'Growth settings'
@@ -5071,6 +5156,7 @@ $script:SqlMaintenanceScript = {
         try {
             $cmd.CommandTimeout = 15
             $cmd.CommandText = @'
+USE [ECS7];
 SELECT CAST(f.size AS bigint) AS SizePages, CAST(f.growth AS bigint) AS GrowthPages,
        CAST(f.max_size AS bigint) AS MaxSizePages, f.is_percent_growth,
        d.log_reuse_wait_desc AS LogReuseWait
@@ -5090,7 +5176,7 @@ WHERE f.name = N'ECS7_log' AND f.type_desc = 'LOG' AND d.name = N'ECS7'
             $cmd.Dispose()
         }
         $o.SizeMB = [Math]::Round($sizePages / 128.0, 1)
-        $o.ShrinkTargetReached = ($sizePages -le 19200)
+        $o.ShrinkTargetReached = ($sizePages -le ($shrinkTargetMb * 128))
         if ($isPercentGrowth -or $growthPages -ne 8192 -or $maxSizePages -ne 1310720) {
             throw 'The final file growth settings do not match the requested 64 MB and 10,240 MB limits.'
         }
@@ -5128,13 +5214,16 @@ function Start-SqlMaintenance {
         Set-SqlMaintenanceStatus 'Wait for the current SQL refresh to finish.' '#F9E2AF'
         return
     }
-    $confirmText = "Back up and shrink ECS7 on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: E:\SQL\BACKUP\ECS7_Log.trn`r`nShrink target: 150 MB`r`nGrowth: 64 MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
+    $directory = ([string]$script:SqlMaintenanceConfig['BackupDirectory']).TrimEnd('\')
+    $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
+    $backupPath = "$directory\ECS7_Log.trn"
+    $confirmText = "Back up and shrink ECS7 on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: 64 MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
     $answer = [System.Windows.MessageBox]::Show($confirmText, 'Confirm ECS7 log maintenance', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer)
+        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($target).AddArgument($directory)
         $script:SqlMaintenanceJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
         $btnSqlMaintenance.IsEnabled = $false
         $btnSqlRefresh.IsEnabled = $false
@@ -5163,9 +5252,9 @@ function Complete-SqlMaintenance {
     }
     $when = (Get-Date).ToString('HH:mm:ss')
     if ($r.ShrinkTargetReached) {
-        Set-SqlMaintenanceStatus "Completed at $when. Log is $($r.SizeMB) MB; 64 MB growth and 10,240 MB maximum verified." '#A6E3A1'
+        Set-SqlMaintenanceStatus "Completed at $when. Log is $($r.SizeMB) MB; $($r.ShrinkTargetMB) MB target, 64 MB growth, and 10,240 MB maximum verified." '#A6E3A1'
     } else {
-        Set-SqlMaintenanceStatus "Backup and file settings verified at $when, but the log remains $($r.SizeMB) MB (150 MB target not reached). Log reuse wait: $($r.LogReuseWait)." '#F9E2AF'
+        Set-SqlMaintenanceStatus "Backup and file settings verified at $when, but the log remains $($r.SizeMB) MB ($($r.ShrinkTargetMB) MB target not reached). Log reuse wait: $($r.LogReuseWait)." '#F9E2AF'
     }
     Start-SqlCheck
 }
@@ -5854,6 +5943,7 @@ Set-TrayIconColor 'Healthy'
 $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
+Initialize-SqlMaintenanceUi
 Initialize-DeviceIntervalUi
 Start-DbVersionCheck
 Initialize-ApUi
