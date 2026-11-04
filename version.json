@@ -1,8 +1,8 @@
 {
-   "version": "2.22.7",
-   "notes": "Makes the ECS7 transaction-log file-growth increment configurable in Settings.",
+   "version": "2.22.8",
+   "notes": "Makes the ECS7 logical transaction-log file name configurable in Settings.",
    "file": "EMBED_Services_Dashboard.ps1",
-   "sha256": "fee94b2f9884d1d6f118192a73b36bb9bb766b3f2d3a6f9ac8ce154baa5a49aa",
+   "sha256": "fac3917e254a956f2bbb954d3ca1afe78229d5928a842e4a9863a63cd67de922",
    "exeAsset": "EMBED_Services_Dashboard.exe",
-   "releaseTag": "v2.22.7"
+   "releaseTag": "v2.22.8"
 }
