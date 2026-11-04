@@ -21,6 +21,7 @@ v2.22.0: Adds fixed remote-admin tasks over WinRM for RDP and approved service c
 v2.22.1: Supports HTTP WinRM with an exact TrustedHosts entry as well as HTTPS.
 v2.22.2: Adds WMI/DCOM as an alternative transport for fixed remote-admin tasks.
 v2.22.3: Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.
+v2.22.5: Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and verification.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -37,7 +38,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.22.4'
+$script:AppVersion = '2.22.5'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -55,7 +56,6 @@ $script:ServiceDefs = @(
 # Service dependencies used to determine a safe start/stop order.
 $script:ServiceDependencies = @{
     MSSQLSERVER = @()
-    SQLBrowser = @('MSSQLSERVER')
     ECSGenSvc = @('MSSQLSERVER')
     EmbedAPI = @('MSSQLSERVER')
     ECSInterface = @('MSSQLSERVER')
@@ -87,6 +87,7 @@ $script:NextServiceRefresh = [datetime]::MinValue
 $script:DeviceSecs     = 60     # device check (Devices tab, saved)
 $script:DeviceCountdown = 60
 $script:SqlJob         = $null  # background SQL tab check
+$script:SqlMaintenanceJob = $null
 $script:SqlInfo        = $null
 $script:LastSqlCheck   = [datetime]::MinValue
 $script:SqlCheckHours  = 24
@@ -677,7 +678,7 @@ function Save-Config {
           <Border Grid.Row="0" Background="#181825" Padding="16,9">
             <Grid>
               <TextBlock x:Name="txtSqlStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,200,0"
-                         Text="Read-only view of the EMBED database. Refreshes when you open this tab and every 24 hours."/>
+                         Text="Read-only SQL diagnostics, except for the explicit ECS7 log maintenance action below."/>
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="btnSqlCopy"    Content="Copy"       Style="{StaticResource BtnBase}" Margin="0,0,6,0" ToolTip="Copy everything on this tab for a ticket"/>
                 <Button x:Name="btnSqlRefresh" Content="↻  Refresh" Style="{StaticResource BtnBlue}"/>
@@ -758,6 +759,17 @@ function Save-Config {
                   </Grid>
                   <TextBlock x:Name="txtSqlFileWarn" Foreground="#F9E2AF" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
                   <TextBlock x:Name="txtSqlFiles" Foreground="#6C7086" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                                    <Border Height="1" Background="#45475A" Margin="0,12,0,10"/>
+                                    <TextBlock Text="LOG FILE MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                    <TextBlock Text="Backs up ECS7 to E:\SQL\BACKUP\ECS7_Log.trn, shrinks ECS7_log to 150 MB, then sets 64 MB growth and a 10,240 MB maximum. The path is on the SQL Server host." Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Button x:Name="btnSqlMaintenance" Grid.Column="0" Content="Backup + Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,10,0" ToolTip="Back up and shrink the ECS7 transaction log, then set and verify file growth limits."/>
+                                        <TextBlock x:Name="txtSqlMaintenanceStatus" Grid.Column="1" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                    </Grid>
                 </StackPanel>
               </Border>
               <!-- SQL Server -->
@@ -1592,6 +1604,8 @@ $tabSql           = Get-Ctrl 'tabSql'
 $txtSqlStatus     = Get-Ctrl 'txtSqlStatus'
 $btnSqlCopy       = Get-Ctrl 'btnSqlCopy'
 $btnSqlRefresh    = Get-Ctrl 'btnSqlRefresh'
+$btnSqlMaintenance = Get-Ctrl 'btnSqlMaintenance'
+$txtSqlMaintenanceStatus = Get-Ctrl 'txtSqlMaintenanceStatus'
 $txtSqlDbFull     = Get-Ctrl 'txtSqlDbFull'
 $txtSqlDbSub      = Get-Ctrl 'txtSqlDbSub'
 $dotBkFull        = Get-Ctrl 'dotBkFull'
@@ -4865,7 +4879,7 @@ function Apply-DeviceInterval {
 $txtDevEvery.Add_KeyDown({ if ($_.Key -eq 'Return') { Apply-DeviceInterval } })
 $txtDevEvery.Add_LostFocus({ Apply-DeviceInterval })
 # ------------------------------------------------------------
-# SQL TAB (backups, file sizes, database version) - read-only
+# SQL TAB (diagnostics and explicit transaction-log maintenance)
 # ------------------------------------------------------------
 $script:SqlScript = {
     param($sqlServer, $knownDb)
@@ -4982,8 +4996,112 @@ $script:SqlScript = {
     } finally { if ($cn) { $cn.Dispose() } }
     [PSCustomObject]$o
 }
+$script:SqlMaintenanceScript = {
+    param($sqlServer)
+    $o = [ordered]@{
+        Ok = $false; Stage = 'Connect'; Error = ''; BackupPath = 'E:\SQL\BACKUP\ECS7_Log.trn'
+        BackupCompleted = $false; ShrinkCompleted = $false; GrowthConfigured = $false
+        ShrinkTargetReached = $false; SizeMB = 0.0; LogReuseWait = ''
+    }
+    function Get-Deepest($err) { $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }; $e.Message }
+    function New-Conn([string]$db) {
+        $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+        $b['Data Source']            = $sqlServer
+        $b['Initial Catalog']        = $db
+        $b['Integrated Security']    = $true
+        $b['TrustServerCertificate'] = $true
+        $b['Connect Timeout']        = 10
+        $b['Application Name']       = 'EMBED Services Dashboard'
+        New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
+    }
+    function Invoke-NonQuery($conn, [string]$sql) {
+        $cmd = $conn.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 1800
+            $cmd.CommandText = $sql
+            [void]$cmd.ExecuteNonQuery()
+        } finally { $cmd.Dispose() }
+    }
+    $cn = $null
+    try {
+        $cn = New-Conn 'master'
+        $cn.Open()
+
+        $o.Stage = 'Preflight'
+        $cmd = $cn.CreateCommand()
+        $reader = $null
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = 'SELECT state_desc, recovery_model_desc FROM sys.databases WHERE name = @databaseName'
+            [void]$cmd.Parameters.AddWithValue('@databaseName', 'ECS7')
+            $reader = $cmd.ExecuteReader()
+            if (-not $reader.Read()) { throw 'Database ECS7 was not found on the configured SQL Server.' }
+            $databaseState = [string]$reader['state_desc']
+            $recoveryModel = [string]$reader['recovery_model_desc']
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            $cmd.Dispose()
+        }
+        if ($databaseState -ne 'ONLINE') { throw "Database ECS7 is $databaseState, not ONLINE." }
+        if ($recoveryModel -eq 'SIMPLE') { throw 'ECS7 uses SIMPLE recovery; SQL Server cannot take the requested transaction-log backup.' }
+
+        $cmd = $cn.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = "USE [ECS7]; SELECT COUNT(*) FROM sys.database_files WHERE name = @fileName AND type_desc = 'LOG'"
+            [void]$cmd.Parameters.AddWithValue('@fileName', 'ECS7_log')
+            if ([int]$cmd.ExecuteScalar() -lt 1) { throw 'Logical log file ECS7_log was not found in database ECS7.' }
+        } finally { $cmd.Dispose() }
+
+        $o.Stage = 'Log backup'
+        Invoke-NonQuery $cn "BACKUP LOG [ECS7] TO DISK = N'E:\SQL\BACKUP\ECS7_Log.trn';"
+        $o.BackupCompleted = $true
+
+        $o.Stage = 'Shrink'
+        Invoke-NonQuery $cn 'DBCC SHRINKFILE (N''ECS7_log'', 150);'
+        $o.ShrinkCompleted = $true
+
+        $o.Stage = 'Growth settings'
+        Invoke-NonQuery $cn 'ALTER DATABASE [ECS7] MODIFY FILE (NAME = N''ECS7_log'', FILEGROWTH = 64MB, MAXSIZE = 10240MB);'
+        $o.GrowthConfigured = $true
+
+        $o.Stage = 'Verification'
+        $cmd = $cn.CreateCommand()
+        $reader = $null
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = @'
+SELECT CAST(f.size AS bigint) AS SizePages, CAST(f.growth AS bigint) AS GrowthPages,
+       CAST(f.max_size AS bigint) AS MaxSizePages, f.is_percent_growth,
+       d.log_reuse_wait_desc AS LogReuseWait
+FROM sys.database_files f
+CROSS JOIN sys.databases d
+WHERE f.name = N'ECS7_log' AND f.type_desc = 'LOG' AND d.name = N'ECS7'
+'@
+            $reader = $cmd.ExecuteReader()
+            if (-not $reader.Read()) { throw 'Could not find ECS7_log while verifying the final file settings.' }
+            $sizePages = [long]$reader['SizePages']
+            $growthPages = [long]$reader['GrowthPages']
+            $maxSizePages = [long]$reader['MaxSizePages']
+            $isPercentGrowth = [bool]$reader['is_percent_growth']
+            $o.LogReuseWait = [string]$reader['LogReuseWait']
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            $cmd.Dispose()
+        }
+        $o.SizeMB = [Math]::Round($sizePages / 128.0, 1)
+        $o.ShrinkTargetReached = ($sizePages -le 19200)
+        if ($isPercentGrowth -or $growthPages -ne 8192 -or $maxSizePages -ne 1310720) {
+            throw 'The final file growth settings do not match the requested 64 MB and 10,240 MB limits.'
+        }
+        $o.Ok = $true
+    } catch {
+        $o.Error = " $($o.Stage) failed: $(Get-Deepest $_)".Trim()
+    } finally { if ($cn) { $cn.Dispose() } }
+    [PSCustomObject]$o
+}
 function Start-SqlCheck {
-    if ($script:SqlJob) { return }
+    if ($script:SqlJob -or $script:SqlMaintenanceJob) { return }
     $script:LastSqlCheck = Get-Date
     $known = ''
     if ($script:DbVer -and $script:DbVer.Ok -and $script:DbVer.PSObject.Properties['Database']) { $known = [string]$script:DbVer.Database }
@@ -4999,6 +5117,57 @@ function Start-SqlCheck {
         $btnSqlRefresh.IsEnabled = $true
         Set-SqlStatus "Could not start the SQL check: $($_.Exception.Message)" '#F38BA8'
     }
+}
+function Set-SqlMaintenanceStatus([string]$text, [string]$hex) {
+    $txtSqlMaintenanceStatus.Text = $text
+    $txtSqlMaintenanceStatus.Foreground = ColorBrush $hex
+}
+function Start-SqlMaintenance {
+    if ($script:SqlMaintenanceJob) { return }
+    if ($script:SqlJob) {
+        Set-SqlMaintenanceStatus 'Wait for the current SQL refresh to finish.' '#F9E2AF'
+        return
+    }
+    $confirmText = "Back up and shrink ECS7 on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: E:\SQL\BACKUP\ECS7_Log.trn`r`nShrink target: 150 MB`r`nGrowth: 64 MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
+    $answer = [System.Windows.MessageBox]::Show($confirmText, 'Confirm ECS7 log maintenance', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer)
+        $script:SqlMaintenanceJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+        $btnSqlMaintenance.IsEnabled = $false
+        $btnSqlRefresh.IsEnabled = $false
+        Set-SqlMaintenanceStatus "Running backup, shrink, and file-setting verification on $($script:GuruSqlServer)..." '#89B4FA'
+    } catch {
+        $script:SqlMaintenanceJob = $null
+        $btnSqlMaintenance.IsEnabled = $true
+        $btnSqlRefresh.IsEnabled = $true
+        Set-SqlMaintenanceStatus "Could not start log maintenance: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-SqlMaintenance {
+    $job = $script:SqlMaintenanceJob
+    $script:SqlMaintenanceJob = $null
+    $btnSqlMaintenance.IsEnabled = $true
+    $btnSqlRefresh.IsEnabled = $true
+    $r = $null
+    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch   { $r = [PSCustomObject]@{ Ok = $false; BackupCompleted = $false; Error = $_.Exception.Message } }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $r) { $r = [PSCustomObject]@{ Ok = $false; BackupCompleted = $false; Error = 'The maintenance job returned no result.' } }
+    if (-not $r.Ok) {
+        $prefix = if ($r.BackupCompleted) { 'Log backup succeeded, but' } else { 'Log maintenance stopped before a successful backup:' }
+        Set-SqlMaintenanceStatus "$prefix $($r.Error)" '#F38BA8'
+        return
+    }
+    $when = (Get-Date).ToString('HH:mm:ss')
+    if ($r.ShrinkTargetReached) {
+        Set-SqlMaintenanceStatus "Completed at $when. Log is $($r.SizeMB) MB; 64 MB growth and 10,240 MB maximum verified." '#A6E3A1'
+    } else {
+        Set-SqlMaintenanceStatus "Backup and file settings verified at $when, but the log remains $($r.SizeMB) MB (150 MB target not reached). Log reuse wait: $($r.LogReuseWait)." '#F9E2AF'
+    }
+    Start-SqlCheck
 }
 function Set-SqlStatus([string]$text, [string]$hex) { $txtSqlStatus.Text = $text; $txtSqlStatus.Foreground = ColorBrush $hex }
 function Format-Size([double]$mb) { if ($mb -ge 1024) { '{0:N1} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
@@ -5133,6 +5302,7 @@ function Get-SqlTabText {
     ) -join "`r`n"
 }
 $btnSqlRefresh.Add_Click({ Start-SqlCheck })
+$btnSqlMaintenance.Add_Click({ Start-SqlMaintenance })
 $btnSqlCopy.Add_Click({
     try { [System.Windows.Clipboard]::SetText((Get-SqlTabText)); Set-SqlStatus 'SQL details copied to clipboard.' '#A6E3A1' }
     catch { Set-SqlStatus "Copy failed: $($_.Exception.Message)" '#F38BA8' }
@@ -5628,6 +5798,7 @@ $script:Timer.Add_Tick({
     if ($script:RemoteAdminJob -and $script:RemoteAdminJob.Handle.IsCompleted) { Complete-RemoteAdminTask }
     if ($script:DbVerJob    -and $script:DbVerJob.Handle.IsCompleted)    { Complete-DbVersionCheck }
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
+    if ($script:SqlMaintenanceJob -and $script:SqlMaintenanceJob.Handle.IsCompleted) { Complete-SqlMaintenance }
     if ($script:ReaderJob   -and $script:ReaderJob.Handle.IsCompleted)   { Complete-ReaderLoad }
     if ($script:RdPingJob   -and $script:RdPingJob.Handle.IsCompleted)   { Complete-ReaderPing }
     if ($script:RdpJob      -and $script:RdpJob.Handle.IsCompleted)      { Complete-RdpConnect }

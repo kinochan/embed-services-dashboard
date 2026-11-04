@@ -1,8 +1,8 @@
 {
-   "version": "2.22.4",
-   "notes": "Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.",
+   "version": "2.22.5",
+   "notes": "Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and verification.",
    "file": "EMBED_Services_Dashboard.ps1",
-   "sha256": "4bc535d58d7a242f45afa5352a1d2106a3b4f5828fcd07e5249c01e313acdf33",
+   "sha256": "5e7a4ed82af278a3340b4d2cff00d87ff1225009b1ffd6f08f358c4214c73355",
    "exeAsset": "EMBED_Services_Dashboard.exe",
-   "releaseTag": "v2.22.4"
+   "releaseTag": "v2.22.5"
 }
