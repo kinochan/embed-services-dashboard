@@ -1,8 +1,8 @@
 {
-   "version": "2.22.3",
+   "version": "2.22.4",
    "notes": "Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.",
    "file": "EMBED_Services_Dashboard.ps1",
    "sha256": "4bc535d58d7a242f45afa5352a1d2106a3b4f5828fcd07e5249c01e313acdf33",
    "exeAsset": "EMBED_Services_Dashboard.exe",
-   "releaseTag": "v2.22.3"
+   "releaseTag": "v2.22.4"
 }

@@ -37,7 +37,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.22.3'
+$script:AppVersion = '2.22.4'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -83,8 +83,7 @@ $script:HistoryList    = New-Object System.Collections.ObjectModel.ObservableCol
 $script:EventList      = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
 $script:PreviousStates = @{}
 $script:ServiceRows    = @{}
-$script:CountdownSecs  = 30
-$script:RefreshSecs    = 30     # service refresh (Settings tab, saved)
+$script:NextServiceRefresh = [datetime]::MinValue
 $script:DeviceSecs     = 60     # device check (Devices tab, saved)
 $script:DeviceCountdown = 60
 $script:SqlJob         = $null  # background SQL tab check
@@ -184,20 +183,18 @@ function Load-Config {
         try {
             return (Get-Content $path -Raw | ConvertFrom-Json)
         } catch {
-            return [PSCustomObject]@{ RefreshSeconds = 30 }
+            return [PSCustomObject]@{}
         }
     } else {
-        return [PSCustomObject]@{ RefreshSeconds = 30 }
+        return [PSCustomObject]@{}
     }
 }
 function Save-Config {
-    param([int]$RefreshSeconds)
     $path = "C:\Program Files (x86)\ECS7\config.json"
     try {
         $dir = Split-Path $path -Parent
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         @{
-            RefreshSeconds   = $RefreshSeconds
             DeviceSeconds    = $script:DeviceSecs
             AccessPoints     = @{
                 RangeStart = $script:ApConfig['RangeStart']; RangeEnd = $script:ApConfig['RangeEnd']
@@ -493,13 +490,6 @@ function Save-Config {
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal"
                     HorizontalAlignment="Center" VerticalAlignment="Center">
-          <Border Background="#313244" CornerRadius="12" Padding="12,4" Margin="10,0,10,0">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock Text="Refresh in " Foreground="#6C7086" FontSize="12" VerticalAlignment="Center"/>
-              <TextBlock x:Name="txtCountdown" Text="30s"
-                         Foreground="#CBA6F7" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
-            </StackPanel>
-          </Border>
           <Border x:Name="dbBadge" Background="#30CBA6F7" CornerRadius="12" Padding="12,4" Margin="0,0,10,0"
                   VerticalAlignment="Center" Cursor="Hand" ToolTip="Checking database version...">
             <StackPanel Orientation="Horizontal">
@@ -1279,7 +1269,7 @@ function Save-Config {
           <StackPanel Margin="20,16,20,20">
             <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,14">
               <StackPanel>
-                <TextBlock Text="TIMERS" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <TextBlock Text="SCHEDULES" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
                 <TextBlock Text="The device check interval is set on the Devices tab."
                            Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
                 <Grid>
@@ -1290,22 +1280,12 @@ function Save-Config {
                   <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
                   </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Service refresh (seconds)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
-                    <TextBox x:Name="txtRefreshEvery" Width="80" ToolTip="10 to 5400 seconds (90 minutes)"/>
-                    <TextBlock x:Name="txtRefreshHint" Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                  </StackPanel>
-                  <TextBlock Grid.Row="1" Text="Database version + SQL tab" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <TextBlock Grid.Row="1" Grid.Column="1" Text="Every 24 hours, at startup, and when you click Refresh" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <TextBlock Grid.Row="2" Text="History logs" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <TextBlock Grid.Row="2" Grid.Column="1" Text="Kept for 3 days" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="0" Text="Database version + SQL tab" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="0" Grid.Column="1" Text="Every 24 hours, at startup, and when you click Refresh" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="1" Text="History logs" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="Kept for 3 days" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
                 </Grid>
-                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                  <Button x:Name="btnTimersSave" Content="Save Timers" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
-                  <TextBlock x:Name="txtTimersStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="6,0,0,0"/>
-                </StackPanel>
               </StackPanel>
             </Border>
             <Border Background="#313244" CornerRadius="8" Padding="18">
@@ -1482,7 +1462,6 @@ $reader = New-Object System.Xml.XmlNodeReader $XAML
 try   { $window = [Windows.Markup.XamlReader]::Load($reader) }
 catch { Write-Error "XAML load failed: $_"; exit 1 }
 function Get-Ctrl($n) { $window.FindName($n) }
-$txtCountdown     = Get-Ctrl 'txtCountdown'
 $adminBadge       = Get-Ctrl 'adminBadge'
 $nonAdminBadge    = Get-Ctrl 'nonAdminBadge'
 $btnRefresh       = Get-Ctrl 'btnRefresh'
@@ -1636,10 +1615,6 @@ $txtSqlFiles      = Get-Ctrl 'txtSqlFiles'
 $txtSqlEdition    = Get-Ctrl 'txtSqlEdition'
 $txtSqlBuild      = Get-Ctrl 'txtSqlBuild'
 $txtSqlUptime     = Get-Ctrl 'txtSqlUptime'
-$txtRefreshEvery  = Get-Ctrl 'txtRefreshEvery'
-$txtRefreshHint   = Get-Ctrl 'txtRefreshHint'
-$btnTimersSave    = Get-Ctrl 'btnTimersSave'
-$txtTimersStatus  = Get-Ctrl 'txtTimersStatus'
 $txtDevEvery      = Get-Ctrl 'txtDevEvery'
 $tabReaders       = Get-Ctrl 'tabReaders'
 $txtRdStatus      = Get-Ctrl 'txtRdStatus'
@@ -1997,7 +1972,7 @@ function Build-ServiceRows {
             $d = $script:ServiceRows[$n].Def
             if ($this.IsChecked) { $script:DisabledServices.Remove($n); $label = 'Monitoring On' }
             else                 { $script:DisabledServices[$n] = $true; $label = 'Monitoring Off' }
-            Save-Config -RefreshSeconds ($script:RefreshSecs)
+            Save-Config
             Add-HistoryEntry -ServiceName $d.Display -Group $d.Group -OldStatus '' -NewStatus $label -Note 'Toggled by user'
             Update-ServiceRow $n
             Refresh-Summary
@@ -2261,7 +2236,7 @@ function Register-OfflineEvent {
 # DEVICES (RDP / IP CHECKER)
 # ------------------------------------------------------------
 $dgDevices.ItemsSource = $script:Devices
-function Save-AllConfig { Save-Config -RefreshSeconds ($script:RefreshSecs) }
+function Save-AllConfig { Save-Config }
 function New-DeviceObject([string]$Name, [string]$LastIP, [string]$LastSeen) {
     [PSCustomObject]@{
         Name        = $Name
@@ -2889,6 +2864,7 @@ function Update-AllServices {
         Update-ServiceRow $def.Name
     }
     Refresh-Summary
+    $script:NextServiceRefresh = [datetime]::Now.AddSeconds(2)
 }
 # ------------------------------------------------------------
 # FILTERING
@@ -2910,11 +2886,6 @@ function Apply-Filter {
 # CONFIG + SLIDER INITIALIZATION
 # ------------------------------------------------------------
 $config = Load-Config
-$secs = 30
-$rp = $config.PSObject.Properties['RefreshSeconds']
-if ($rp) { $secs = [int]$rp.Value }
-if ($secs -lt 10) { $secs = 10 }
-if ($secs -gt 5400) { $secs = 5400 }
 $dp = $config.PSObject.Properties['DisabledServices']
 if ($dp -and $dp.Value) {
     foreach ($n in @($dp.Value)) { $script:DisabledServices[[string]$n] = $true }
@@ -3008,9 +2979,6 @@ $script:ApCountdown = [int]$script:ApConfig['PingSecs']
 $ds = $config.PSObject.Properties['DeviceSeconds']
 if ($ds -and $ds.Value) { $v = [int]$ds.Value; if ($v -ge 30 -and $v -le 3600) { $script:DeviceSecs = $v } }
 $script:DeviceCountdown = $script:DeviceSecs
-$script:RefreshSecs   = $secs
-$script:CountdownSecs = $secs
-$txtCountdown.Text    = Format-Countdown $secs
 # ------------------------------------------------------------
 # ADMIN BADGES
 # ------------------------------------------------------------
@@ -3043,7 +3011,6 @@ $miShow.Add_Click({
     $window.Activate()
 })
 $miRefresh.Add_Click({
-    $script:CountdownSecs = $script:RefreshSecs
     Set-StatusColor 'Updating'
     Set-TrayIconColor 'Updating'
     $statusBar.Text = "Tray refresh..."
@@ -3070,7 +3037,6 @@ $window.Add_Closing({
 # BUTTON WIRES
 # ------------------------------------------------------------
 $btnRefresh.Add_Click({
-    $script:CountdownSecs = $script:RefreshSecs
     Set-StatusColor 'Updating'
     Set-TrayIconColor 'Updating'
     $statusBar.Text = "Manual refresh..."
@@ -3183,7 +3149,7 @@ function Apply-SmtpUi {
 $btnSmtpSave.Add_Click({
     $err = Apply-SmtpUi
     if ($err) { Set-SmtpStatus $err '#F38BA8'; return }
-    Save-Config -RefreshSeconds ($script:RefreshSecs)
+    Save-Config
     Update-SmtpPwdHint
     Set-SmtpStatus ("Saved at {0}" -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
 })
@@ -3195,7 +3161,7 @@ $btnSmtpTest.Add_Click({
         Set-SmtpStatus 'Fill in Server, From and Send alerts to first.' '#F38BA8'
         return
     }
-    Save-Config -RefreshSeconds ($script:RefreshSecs)
+    Save-Config
     Update-SmtpPwdHint
     Set-SmtpStatus 'Sending test email...' '#89B4FA'
     $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
@@ -4878,26 +4844,11 @@ $dgDevices.Add_PreviewMouseLeftButtonDown({
 })
 $txtSwRoot.Text = [string]$script:SoftwareConfig['StationRoot']
 # ------------------------------------------------------------
-# TIMERS (service refresh on Settings, device check on Devices)
+# DEVICE CHECK INTERVAL
 # ------------------------------------------------------------
-function Initialize-TimerUi {
-    $txtRefreshEvery.Text = [string]$script:RefreshSecs
-    $txtRefreshHint.Text  = "= $(Format-Countdown $script:RefreshSecs)  (10 sec to 90 min)"
+function Initialize-DeviceIntervalUi {
     $txtDevEvery.Text     = [string]$script:DeviceSecs
 }
-function Set-TimersStatus([string]$text, [string]$hex) { $txtTimersStatus.Text = $text; $txtTimersStatus.Foreground = ColorBrush $hex }
-$btnTimersSave.Add_Click({
-    $v = 0
-    if (-not [int]::TryParse($txtRefreshEvery.Text.Trim(), [ref]$v) -or $v -lt 10 -or $v -gt 5400) {
-        Set-TimersStatus 'Service refresh must be a number from 10 to 5400 seconds.' '#F38BA8'; return
-    }
-    $script:RefreshSecs   = $v
-    $script:CountdownSecs = $v
-    $txtCountdown.Text    = Format-Countdown $v
-    Save-AllConfig
-    Initialize-TimerUi
-    Set-TimersStatus ("Saved at {0}. Services refresh every {1}." -f (Get-Date).ToString('HH:mm:ss'), (Format-Countdown $v)) '#A6E3A1'
-})
 function Apply-DeviceInterval {
     $v = 0
     if (-not [int]::TryParse($txtDevEvery.Text.Trim(), [ref]$v) -or $v -lt 30 -or $v -gt 3600) {
@@ -5696,9 +5647,7 @@ $script:Timer.Add_Tick({
     if ((-not $script:UpdateScan) -and $script:UpdateConfig['AutoCheck'] -and ([string]$script:UpdateConfig['Repo']) -and (((Get-Date) - $script:LastUpdateCheck).TotalHours -ge 6)) {
         Start-UpdateCheck ([bool]$script:UpdateConfig['AutoInstall'])
     }
-    $script:CountdownSecs--
-    if ($script:CountdownSecs -le 0) {
-        $script:CountdownSecs = $script:RefreshSecs
+    if ([datetime]::Now -ge $script:NextServiceRefresh) {
         Set-StatusColor 'Updating'
         Set-TrayIconColor 'Updating'
         $statusBar.Text = "Refreshing services..."
@@ -5721,7 +5670,6 @@ $script:Timer.Add_Tick({
         Set-StatusColor 'Healthy'
         Set-TrayIconColor 'Healthy'
     }
-    $txtCountdown.Text = Format-Countdown $script:CountdownSecs
 })
 # ------------------------------------------------------------
 # INITIALIZE UI
@@ -5735,7 +5683,7 @@ Set-TrayIconColor 'Healthy'
 $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
-Initialize-TimerUi
+Initialize-DeviceIntervalUi
 Start-DbVersionCheck
 Initialize-ApUi
 if ($script:ApList.Count -gt 0) { Start-ApJob $false } else { Start-ApJob $true }   # first run finds the APs
