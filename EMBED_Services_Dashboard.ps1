@@ -24,6 +24,7 @@ v2.22.3: Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.
 v2.22.5: Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and verification.
 v2.22.6: Makes the ECS7 log shrink target and backup directory configurable in Settings.
 v2.22.7: Makes the ECS7 transaction-log file-growth increment configurable in Settings.
+v2.22.8: Makes the ECS7 logical transaction-log file name configurable in Settings.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -40,7 +41,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.22.7'
+$script:AppVersion = '2.22.8'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -90,7 +91,7 @@ $script:DeviceSecs     = 60     # device check (Devices tab, saved)
 $script:DeviceCountdown = 60
 $script:SqlJob         = $null  # background SQL tab check
 $script:SqlMaintenanceJob = $null
-$script:SqlMaintenanceConfig = @{ ShrinkTargetMB = 150; GrowthMB = 64; BackupDirectory = 'E:\SQL\BACKUP' }
+$script:SqlMaintenanceConfig = @{ LogicalLogName = 'ECS7_log'; ShrinkTargetMB = 150; GrowthMB = 64; BackupDirectory = 'E:\SQL\BACKUP' }
 $script:SqlInfo        = $null
 $script:LastSqlCheck   = [datetime]::MinValue
 $script:SqlCheckHours  = 24
@@ -1318,13 +1319,16 @@ function Save-Config {
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
-                                    <TextBlock Grid.Row="0" Text="Shrink target (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                                    <TextBox x:Name="txtSqlShrinkTarget" Grid.Row="0" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
-                                    <TextBlock Grid.Row="1" Text="File growth increment (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                                    <TextBox x:Name="txtSqlGrowthMb" Grid.Row="1" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
-                                    <TextBlock Grid.Row="2" Text="Backup directory (SQL Server)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                                    <TextBox x:Name="txtSqlBackupDirectory" Grid.Row="2" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="Absolute drive path or UNC directory on the SQL Server host"/>
+                                    <TextBlock Grid.Row="0" Text="Logical log file name" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlLogicalLogName" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="SQL logical file name, for example ECS7_log or ECS7_Seabrook_Log"/>
+                                    <TextBlock Grid.Row="1" Text="Shrink target (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlShrinkTarget" Grid.Row="1" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
+                                    <TextBlock Grid.Row="2" Text="File growth increment (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlGrowthMb" Grid.Row="2" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
+                                    <TextBlock Grid.Row="3" Text="Backup directory (SQL Server)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlBackupDirectory" Grid.Row="3" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="Absolute drive path or UNC directory on the SQL Server host"/>
                                 </Grid>
                                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                     <Button x:Name="btnSqlMaintenanceSave" Content="Save Log Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
@@ -1611,6 +1615,7 @@ $btnSnapSave      = Get-Ctrl 'btnSnapSave'
 $btnSnapOpen      = Get-Ctrl 'btnSnapOpen'
 $txtSnapStatus    = Get-Ctrl 'txtSnapStatus'
 $txtSqlShrinkTarget = Get-Ctrl 'txtSqlShrinkTarget'
+$txtSqlLogicalLogName = Get-Ctrl 'txtSqlLogicalLogName'
 $txtSqlGrowthMb = Get-Ctrl 'txtSqlGrowthMb'
 $txtSqlBackupDirectory = Get-Ctrl 'txtSqlBackupDirectory'
 $btnSqlMaintenanceSave = Get-Ctrl 'btnSqlMaintenanceSave'
@@ -2977,6 +2982,13 @@ $sq = $config.PSObject.Properties['SqlServer']
 if ($sq -and $sq.Value) { $script:GuruSqlServer = [string]$sq.Value }
 $lm = $config.PSObject.Properties['SqlMaintenance']
 if ($lm -and $lm.Value) {
+    $logNameSetting = $lm.Value.PSObject.Properties['LogicalLogName']
+    if ($logNameSetting) {
+        $logNameValue = ([string]$logNameSetting.Value).Trim()
+        if ($logNameValue.Length -ge 1 -and $logNameValue.Length -le 128 -and $logNameValue -notmatch '[\x00-\x1F]') {
+            $script:SqlMaintenanceConfig['LogicalLogName'] = $logNameValue
+        }
+    }
     $targetSetting = $lm.Value.PSObject.Properties['ShrinkTargetMB']
     if ($targetSetting) {
         $targetValue = 0
@@ -3667,11 +3679,13 @@ function Initialize-SnapshotUi {
 }
 function Update-SqlMaintenancePlan {
     $directory = ([string]$script:SqlMaintenanceConfig['BackupDirectory']).TrimEnd('\')
+    $logName = [string]$script:SqlMaintenanceConfig['LogicalLogName']
     $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
     $growth = [int]$script:SqlMaintenanceConfig['GrowthMB']
-    $txtSqlMaintenancePlan.Text = "Backs up ECS7 to $directory\ECS7_Log.trn, shrinks ECS7_log to $target MB, then sets $growth MB growth and a 10,240 MB maximum."
+    $txtSqlMaintenancePlan.Text = "Backs up ECS7 to $directory\ECS7_Log.trn, shrinks $logName to $target MB, then sets $growth MB growth and a 10,240 MB maximum."
 }
 function Initialize-SqlMaintenanceUi {
+    $txtSqlLogicalLogName.Text = [string]$script:SqlMaintenanceConfig['LogicalLogName']
     $txtSqlShrinkTarget.Text = [string]$script:SqlMaintenanceConfig['ShrinkTargetMB']
     $txtSqlGrowthMb.Text = [string]$script:SqlMaintenanceConfig['GrowthMB']
     $txtSqlBackupDirectory.Text = [string]$script:SqlMaintenanceConfig['BackupDirectory']
@@ -3682,6 +3696,11 @@ function Set-SqlMaintenanceSettingsStatus([string]$text, [string]$hex) {
     $txtSqlMaintenanceSettingsStatus.Foreground = ColorBrush $hex
 }
 $btnSqlMaintenanceSave.Add_Click({
+    $logName = $txtSqlLogicalLogName.Text.Trim()
+    if (-not $logName -or $logName.Length -gt 128 -or $logName -match '[\x00-\x1F]') {
+        Set-SqlMaintenanceSettingsStatus 'Logical log file name must be 1 to 128 characters and contain no control characters.' '#F38BA8'
+        return
+    }
     $target = 0
     if (-not [int]::TryParse($txtSqlShrinkTarget.Text.Trim(), [ref]$target) -or $target -lt 1 -or $target -gt 10240) {
         Set-SqlMaintenanceSettingsStatus 'Shrink target must be a whole number from 1 to 10240 MB.' '#F38BA8'
@@ -3699,6 +3718,7 @@ $btnSqlMaintenanceSave.Add_Click({
         Set-SqlMaintenanceSettingsStatus 'Enter an absolute drive or UNC directory on the SQL Server host.' '#F38BA8'
         return
     }
+    $script:SqlMaintenanceConfig['LogicalLogName'] = $logName
     $script:SqlMaintenanceConfig['ShrinkTargetMB'] = $target
     $script:SqlMaintenanceConfig['GrowthMB'] = $growth
     $script:SqlMaintenanceConfig['BackupDirectory'] = $directory
@@ -5100,10 +5120,12 @@ $script:SqlScript = {
     [PSCustomObject]$o
 }
 $script:SqlMaintenanceScript = {
-    param($sqlServer, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory)
+    param($sqlServer, [string]$logicalLogName, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory)
     $backupPath = $backupDirectory.TrimEnd('\') + '\ECS7_Log.trn'
+    $escapedLogicalLogName = $logicalLogName.Replace("'", "''")
+    $quotedLogicalLogName = '[' + $logicalLogName.Replace(']', ']]') + ']'
     $o = [ordered]@{
-        Ok = $false; Stage = 'Connect'; Error = ''; BackupPath = $backupPath; ShrinkTargetMB = $shrinkTargetMb; GrowthMB = $growthMb
+        Ok = $false; Stage = 'Connect'; Error = ''; BackupPath = $backupPath; LogicalLogName = $logicalLogName; ShrinkTargetMB = $shrinkTargetMb; GrowthMB = $growthMb
         BackupCompleted = $false; ShrinkCompleted = $false; GrowthConfigured = $false
         ShrinkTargetReached = $false; SizeMB = 0.0; LogReuseWait = ''
     }
@@ -5153,8 +5175,8 @@ $script:SqlMaintenanceScript = {
         try {
             $cmd.CommandTimeout = 15
             $cmd.CommandText = "USE [ECS7]; SELECT COUNT(*) FROM sys.database_files WHERE name = @fileName AND type_desc = 'LOG'"
-            [void]$cmd.Parameters.AddWithValue('@fileName', 'ECS7_log')
-            if ([int]$cmd.ExecuteScalar() -lt 1) { throw 'Logical log file ECS7_log was not found in database ECS7.' }
+            [void]$cmd.Parameters.AddWithValue('@fileName', $logicalLogName)
+            if ([int]$cmd.ExecuteScalar() -lt 1) { throw "Logical log file '$logicalLogName' was not found in database ECS7." }
         } finally { $cmd.Dispose() }
 
         $o.Stage = 'Log backup'
@@ -5163,11 +5185,11 @@ $script:SqlMaintenanceScript = {
         $o.BackupCompleted = $true
 
         $o.Stage = 'Shrink'
-        Invoke-NonQuery $cn ("DBCC SHRINKFILE (N'ECS7_log', {0});" -f $shrinkTargetMb)
+        Invoke-NonQuery $cn ("DBCC SHRINKFILE (N'{0}', {1});" -f $escapedLogicalLogName, $shrinkTargetMb)
         $o.ShrinkCompleted = $true
 
         $o.Stage = 'Growth settings'
-        Invoke-NonQuery $cn ("ALTER DATABASE [ECS7] MODIFY FILE (NAME = N'ECS7_log', FILEGROWTH = {0}MB, MAXSIZE = 10240MB);" -f $growthMb)
+        Invoke-NonQuery $cn ("ALTER DATABASE [ECS7] MODIFY FILE (NAME = {0}, FILEGROWTH = {1}MB, MAXSIZE = 10240MB);" -f $quotedLogicalLogName, $growthMb)
         $o.GrowthConfigured = $true
 
         $o.Stage = 'Verification'
@@ -5182,10 +5204,11 @@ SELECT CAST(f.size AS bigint) AS SizePages, CAST(f.growth AS bigint) AS GrowthPa
        d.log_reuse_wait_desc AS LogReuseWait
 FROM sys.database_files f
 CROSS JOIN sys.databases d
-WHERE f.name = N'ECS7_log' AND f.type_desc = 'LOG' AND d.name = N'ECS7'
+WHERE f.name = @fileName AND f.type_desc = 'LOG' AND d.name = N'ECS7'
 '@
+            [void]$cmd.Parameters.AddWithValue('@fileName', $logicalLogName)
             $reader = $cmd.ExecuteReader()
-            if (-not $reader.Read()) { throw 'Could not find ECS7_log while verifying the final file settings.' }
+            if (-not $reader.Read()) { throw "Could not find $logicalLogName while verifying the final file settings." }
             $sizePages = [long]$reader['SizePages']
             $growthPages = [long]$reader['GrowthPages']
             $maxSizePages = [long]$reader['MaxSizePages']
@@ -5235,16 +5258,17 @@ function Start-SqlMaintenance {
         return
     }
     $directory = ([string]$script:SqlMaintenanceConfig['BackupDirectory']).TrimEnd('\')
+    $logName = [string]$script:SqlMaintenanceConfig['LogicalLogName']
     $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
     $growth = [int]$script:SqlMaintenanceConfig['GrowthMB']
     $backupPath = "$directory\ECS7_Log.trn"
-    $confirmText = "Back up and shrink ECS7 on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
+    $confirmText = "Back up and shrink ECS7 log file '$logName' on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
     $answer = [System.Windows.MessageBox]::Show($confirmText, 'Confirm ECS7 log maintenance', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($target).AddArgument($growth).AddArgument($directory)
+        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($logName).AddArgument($target).AddArgument($growth).AddArgument($directory)
         $script:SqlMaintenanceJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
         $btnSqlMaintenance.IsEnabled = $false
         $btnSqlRefresh.IsEnabled = $false
@@ -5273,9 +5297,9 @@ function Complete-SqlMaintenance {
     }
     $when = (Get-Date).ToString('HH:mm:ss')
     if ($r.ShrinkTargetReached) {
-        Set-SqlMaintenanceStatus "Completed at $when. Log is $($r.SizeMB) MB; $($r.ShrinkTargetMB) MB target, $($r.GrowthMB) MB growth, and 10,240 MB maximum verified." '#A6E3A1'
+        Set-SqlMaintenanceStatus "Completed at $when. $($r.LogicalLogName) is $($r.SizeMB) MB; $($r.ShrinkTargetMB) MB target, $($r.GrowthMB) MB growth, and 10,240 MB maximum verified." '#A6E3A1'
     } else {
-        Set-SqlMaintenanceStatus "Backup and file settings verified at $when, but the log remains $($r.SizeMB) MB ($($r.ShrinkTargetMB) MB target not reached). Log reuse wait: $($r.LogReuseWait)." '#F9E2AF'
+        Set-SqlMaintenanceStatus "Backup and file settings verified at $when, but $($r.LogicalLogName) remains $($r.SizeMB) MB ($($r.ShrinkTargetMB) MB target not reached). Log reuse wait: $($r.LogReuseWait)." '#F9E2AF'
     }
     Start-SqlCheck
 }
