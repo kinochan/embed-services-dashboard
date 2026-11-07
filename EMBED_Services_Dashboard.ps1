@@ -1,6 +1,8 @@
 ﻿#Requires -Version 5.1
 <#
 EMBED Services Dashboard - Enhanced Edition (Optimized)
+Version 1 was just a simple service monitor. This version is a full-featured WPF dashboard for monitoring and controlling EMBED Windows services.
+Version 2 is a complete rewrite with a modern WPF interface, service dependency awareness, and many new features.
 WPF dashboard for monitoring and controlling EMBED Windows services.
 Features: Minimize-to-Tray, Windows Event Viewer, Status History Panel, Service Control Panel,
 health colors, dependency-aware service ordering, AnyDesk monitoring, Access Points / UniFi,
