@@ -1,8 +1,8 @@
 {
-   "version": "2.22.8",
-   "notes": "Makes the ECS7 logical transaction-log file name configurable in Settings.",
+   "version": "2.22.15",
+   "notes": "Detects log timestamps and severity, with error/warning and time-range filters.",
    "file": "EMBED_Services_Dashboard.ps1",
-   "sha256": "fac3917e254a956f2bbb954d3ca1afe78229d5928a842e4a9863a63cd67de922",
+   "sha256": "dd83c8d6f002c56f34506b9d93db2ff884643295c7e20028bb5d6d09ba567684",
    "exeAsset": "EMBED_Services_Dashboard.exe",
-   "releaseTag": "v2.22.8"
+   "releaseTag": "v2.22.15"
 }

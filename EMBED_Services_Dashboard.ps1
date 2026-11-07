@@ -25,6 +25,13 @@ v2.22.5: Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and 
 v2.22.6: Makes the ECS7 log shrink target and backup directory configurable in Settings.
 v2.22.7: Makes the ECS7 transaction-log file-growth increment configurable in Settings.
 v2.22.8: Makes the ECS7 logical transaction-log file name configurable in Settings.
+v2.22.9: Adds a grouped, searchable viewer for EMBED program logs.
+v2.22.10: Separates EPG credit card transaction logs into their own Logs subtab.
+v2.22.11: Adds ECSGenService, EMBED API, and ECS Reports log subtabs.
+v2.22.12: Separates general KIOSK logs from KIOSK Service logs.
+v2.22.13: Adds a GURU Server logs subtab.
+v2.22.14: Simplifies Logs subtab headers to show only the program group names.
+v2.22.15: Detects log timestamps and severity, with error/warning and time-range filters.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -41,7 +48,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.22.8'
+$script:AppVersion = '2.22.15'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -140,6 +147,7 @@ $script:SmtpConfig = @{          # email alert settings (saved to config.json)
 }
 $script:DataRoot       = 'C:\Program Files (x86)\ECS7\Dashboard'   # snapshots + history logs
 $script:EcsDir         = 'C:\Program Files (x86)\ECS7'             # scanned for EMBED versions and logs
+$script:LogRoot        = Join-Path $script:EcsDir 'Logs'
 $script:SnapshotRoot   = Join-Path $script:DataRoot 'Snapshots'
 $script:HistoryDir     = Join-Path $script:DataRoot 'History'
 $script:HistoryDays    = 3                                         # daily history CSVs older than this are deleted
@@ -790,6 +798,47 @@ function Save-Config {
           </ScrollViewer>
         </Grid>
       </TabItem>
+            <!-- EMBED program logs -->
+            <TabItem Header="  Logs  " x:Name="tabLogs">
+                <Grid Background="#1E1E2E">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Border Grid.Row="0" Background="#181825" Padding="16,9">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="txtLogStatus" Grid.Column="0" Foreground="#6C7086" FontSize="12"
+                                                 VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"
+                                                 Text="Log files load from C:\Program Files (x86)\ECS7\Logs when this tab opens."/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <ComboBox x:Name="cmbLogSeverity" Width="130" SelectedIndex="0" Margin="0,0,6,0"
+                                          ToolTip="Show all lines, errors, warnings, or both">
+                                    <ComboBoxItem Content="All levels" Tag="All"/>
+                                    <ComboBoxItem Content="Errors" Tag="Error"/>
+                                    <ComboBoxItem Content="Warnings" Tag="Warning"/>
+                                    <ComboBoxItem Content="Errors + warnings" Tag="ErrorWarning"/>
+                                </ComboBox>
+                                <ComboBox x:Name="cmbLogTime" Width="125" SelectedIndex="0" Margin="0,0,6,0"
+                                          ToolTip="Filter by detected timestamps; lines without timestamps are hidden when a range is selected">
+                                    <ComboBoxItem Content="Any time" Tag="All"/>
+                                    <ComboBoxItem Content="Last hour" Tag="Hour"/>
+                                    <ComboBoxItem Content="Last 24 hours" Tag="Day"/>
+                                    <ComboBoxItem Content="Today" Tag="Today"/>
+                                </ComboBox>
+                                <TextBox x:Name="txtLogSearch" Width="190" Margin="0,0,6,0"
+                                                 ToolTip="Find text in the selected log's displayed tail"/>
+                                <Button x:Name="btnLogFind" Content="Find Next" Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
+                                <Button x:Name="btnLogRefresh" Content="↻  Refresh" Style="{StaticResource BtnBlue}"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <TabControl x:Name="LogProgramTabs" Grid.Row="1"/>
+                </Grid>
+            </TabItem>
         <!-- Readers -->
         <TabItem Header="  Readers  " x:Name="tabReaders">
           <Grid Background="#1E1E2E">
@@ -1643,6 +1692,14 @@ $btnDevSoftware   = New-Object System.Windows.Controls.Button   # not on screen 
 $txtDbVer         = Get-Ctrl 'txtDbVer'
 $MainTabs         = Get-Ctrl 'MainTabs'
 $tabSql           = Get-Ctrl 'tabSql'
+$tabLogs          = Get-Ctrl 'tabLogs'
+$txtLogStatus     = Get-Ctrl 'txtLogStatus'
+$txtLogSearch     = Get-Ctrl 'txtLogSearch'
+$cmbLogSeverity   = Get-Ctrl 'cmbLogSeverity'
+$cmbLogTime       = Get-Ctrl 'cmbLogTime'
+$btnLogFind       = Get-Ctrl 'btnLogFind'
+$btnLogRefresh    = Get-Ctrl 'btnLogRefresh'
+$LogProgramTabs   = Get-Ctrl 'LogProgramTabs'
 $txtSqlStatus     = Get-Ctrl 'txtSqlStatus'
 $btnSqlCopy       = Get-Ctrl 'btnSqlCopy'
 $btnSqlRefresh    = Get-Ctrl 'btnSqlRefresh'
@@ -5448,7 +5505,305 @@ $MainTabs.Add_SelectionChanged({
     if ($_.OriginalSource -ne $MainTabs) { return }
     if ($tabSql.IsSelected -and -not $script:SqlJob -and ((Get-Date) - $script:LastSqlCheck).TotalSeconds -ge 60) { Start-SqlCheck }
     if ($tabReaders.IsSelected -and -not $script:ReaderJob -and ((Get-Date) - $script:LastReaderLoad).TotalSeconds -ge 60) { Start-ReaderLoad }
+    if ($tabLogs.IsSelected -and $script:LastLogScan -eq [datetime]::MinValue -and -not $script:LogJob) { Start-LogScan }
 })
+# ------------------------------------------------------------
+# EMBED PROGRAM LOGS
+# ------------------------------------------------------------
+$script:LogJob = $null
+$script:LastLogScan = [datetime]::MinValue
+$script:LogGroups = @()
+$script:LogScript = {
+    param([string]$mode, [string]$root, [string]$path)
+    try {
+        if ($mode -eq 'Scan') {
+            if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+                return [PSCustomObject]@{ Ok = $false; Error = "Log folder not found: $root"; Files = @() }
+            }
+            $rootPrefix = $root.TrimEnd('\') + '\'
+            $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)\.(log|txt|err|out|trace|csv)(\.\d+)*$' } |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1000 | ForEach-Object {
+                    [PSCustomObject]@{
+                        Name = $_.Name
+                        FullName = $_.FullName
+                        RelativePath = $_.FullName.Substring($rootPrefix.Length)
+                        LastWriteTime = $_.LastWriteTime
+                        LengthMB = [Math]::Round($_.Length / 1MB, 1)
+                    }
+                })
+            return [PSCustomObject]@{ Ok = $true; Files = $files }
+        }
+
+        $lines = @(Get-Content -LiteralPath $path -Tail 5000 -ErrorAction Stop)
+        return [PSCustomObject]@{
+            Ok = $true; Path = $path; Text = [string]::Join([Environment]::NewLine, [string[]]$lines)
+            LineCount = $lines.Count; Truncated = ($lines.Count -ge 5000)
+        }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message; Path = $path }
+    }
+}
+$script:LogGroupDefs = @(
+    [PSCustomObject]@{ Label = 'ECSGenService'; Name = 'ECSGenService'; Pattern = '(?i)ecsgen' }
+    [PSCustomObject]@{ Label = 'EMBED API'; Name = 'EMBED API'; Pattern = '(?i)embed.?api' }
+    [PSCustomObject]@{ Label = 'ECS Reports'; Name = 'ECS Reports'; Pattern = '(?i)ecs.?reports|reports.?service' }
+    [PSCustomObject]@{ Label = 'GURU Server'; Name = 'GURU Server'; Pattern = '(?i)guru[\s._-]*server' }
+    [PSCustomObject]@{ Label = 'KIOSK Service'; Name = 'KIOSK_SERVICE'; Pattern = '(?i)kiosk.{0,20}service|service.{0,20}kiosk' }
+    [PSCustomObject]@{ Label = 'KIOSK'; Name = 'KIOSK'; Pattern = '(?i)kiosk' }
+    [PSCustomObject]@{ Label = 'SALES'; Name = 'SALES'; Pattern = '(?i)sales' }
+    [PSCustomObject]@{ Label = 'POS'; Name = 'POS'; Pattern = '' }
+    [PSCustomObject]@{ Label = 'PRIZES'; Name = 'PRIZES'; Pattern = '(?i)priz' }
+    [PSCustomObject]@{ Label = 'EPG'; Name = 'EPG'; Pattern = '(?i)epg' }
+    [PSCustomObject]@{ Label = 'Other'; Name = 'Other'; Pattern = '' }
+)
+function Initialize-LogTabs {
+    $LogProgramTabs.Items.Clear()
+    $script:LogGroups = @()
+    foreach ($definition in $script:LogGroupDefs) {
+        $group = [PSCustomObject]@{
+            Label = $definition.Label; Name = $definition.Name; Pattern = $definition.Pattern
+            Files = (New-Object System.Collections.ObjectModel.ObservableCollection[PSObject])
+            Tab = $null; List = $null; Viewer = $null; PathText = $null; Content = ''; Lines = @()
+        }
+        $tab = New-Object Windows.Controls.TabItem
+        $tab.Header = $group.Label
+        $tab.Style = $window.FindResource('SubTabItem')
+        $tab.Tag = $group
+
+        $grid = New-Object Windows.Controls.Grid
+        $grid.Background = ColorBrush '#1E1E2E'
+        $leftColumn = New-Object Windows.Controls.ColumnDefinition
+        $leftColumn.Width = New-Object Windows.GridLength(300)
+        $rightColumn = New-Object Windows.Controls.ColumnDefinition
+        $rightColumn.Width = New-Object Windows.GridLength(1, [Windows.GridUnitType]::Star)
+        $grid.ColumnDefinitions.Add($leftColumn)
+        $grid.ColumnDefinitions.Add($rightColumn)
+
+        $filePanel = New-Object Windows.Controls.DockPanel
+        $filePanel.Margin = New-Object Windows.Thickness(12, 10, 8, 10)
+        $fileHeading = New-Object Windows.Controls.TextBlock
+        $fileHeading.Text = 'LOG FILES'
+        $fileHeading.Foreground = ColorBrush '#CBA6F7'
+        $fileHeading.FontSize = 11
+        $fileHeading.FontWeight = 'SemiBold'
+        $fileHeading.Margin = New-Object Windows.Thickness(0, 0, 0, 8)
+        [Windows.Controls.DockPanel]::SetDock($fileHeading, [Windows.Controls.Dock]::Top)
+        $fileList = New-Object Windows.Controls.ListBox
+        $fileList.DisplayMemberPath = 'RelativePath'
+        $fileList.ItemsSource = $group.Files
+        $fileList.Background = ColorBrush '#181825'
+        $fileList.Foreground = ColorBrush '#CDD6F4'
+        $fileList.BorderBrush = ColorBrush '#45475A'
+        [Windows.Controls.ScrollViewer]::SetHorizontalScrollBarVisibility($fileList, [Windows.Controls.ScrollBarVisibility]::Auto)
+        $filePanel.Children.Add($fileHeading) | Out-Null
+        $filePanel.Children.Add($fileList) | Out-Null
+        [Windows.Controls.Grid]::SetColumn($filePanel, 0)
+
+        $viewPanel = New-Object Windows.Controls.DockPanel
+        $viewPanel.Margin = New-Object Windows.Thickness(8, 10, 12, 10)
+        $pathText = New-Object Windows.Controls.TextBlock
+        $pathText.Text = 'Select a log file to view its latest lines.'
+        $pathText.Foreground = ColorBrush '#6C7086'
+        $pathText.FontSize = 11
+        $pathText.TextWrapping = 'Wrap'
+        $pathText.Margin = New-Object Windows.Thickness(0, 0, 0, 8)
+        [Windows.Controls.DockPanel]::SetDock($pathText, [Windows.Controls.Dock]::Top)
+        $viewer = New-Object Windows.Controls.TextBox
+        $viewer.IsReadOnly = $true
+        $viewer.AcceptsReturn = $true
+        $viewer.AcceptsTab = $true
+        $viewer.TextWrapping = 'NoWrap'
+        $viewer.VerticalScrollBarVisibility = 'Auto'
+        $viewer.HorizontalScrollBarVisibility = 'Auto'
+        $viewer.FontFamily = 'Consolas'
+        $viewer.FontSize = 11
+        $viewer.Background = ColorBrush '#181825'
+        $viewer.Foreground = ColorBrush '#CDD6F4'
+        $viewer.BorderBrush = ColorBrush '#45475A'
+        $viewPanel.Children.Add($pathText) | Out-Null
+        $viewPanel.Children.Add($viewer) | Out-Null
+        [Windows.Controls.Grid]::SetColumn($viewPanel, 1)
+
+        $grid.Children.Add($filePanel) | Out-Null
+        $grid.Children.Add($viewPanel) | Out-Null
+        $tab.Content = $grid
+        $group.Tab = $tab
+        $group.List = $fileList
+        $group.Viewer = $viewer
+        $group.PathText = $pathText
+        $fileList.Tag = $group
+        $fileList.Add_SelectionChanged({
+            if ($this.SelectedItem) { Start-LogRead $this.Tag ([string]$this.SelectedItem.FullName) }
+        })
+        $script:LogGroups += $group
+        $LogProgramTabs.Items.Add($tab) | Out-Null
+    }
+}
+function Start-LogOperation([string]$Mode, $Group, [string]$Path) {
+    if ($script:LogJob) {
+        $txtLogStatus.Text = 'A log operation is already running.'
+        return
+    }
+    $rs = $null
+    $ps = $null
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript($script:LogScript.ToString()).AddArgument($Mode).AddArgument([string]$script:LogRoot).AddArgument($Path)
+        $script:LogJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Mode = $Mode; Group = $Group; Path = $Path }
+        if ($Mode -eq 'Scan') {
+            $btnLogRefresh.IsEnabled = $false
+            $txtLogStatus.Text = "Scanning $($script:LogRoot)..."
+        } else {
+            foreach ($item in $script:LogGroups) { $item.List.IsEnabled = $false }
+            $txtLogStatus.Text = "Reading $([IO.Path]::GetFileName($Path))..."
+        }
+    } catch {
+        $script:LogJob = $null
+        if ($ps) { $ps.Dispose() }
+        if ($rs) { if ($rs.RunspaceStateInfo.State -eq 'Opened') { $rs.Close() }; $rs.Dispose() }
+        $btnLogRefresh.IsEnabled = $true
+        foreach ($item in $script:LogGroups) { $item.List.IsEnabled = $true }
+        $txtLogStatus.Text = "Could not start log operation: $($_.Exception.Message)"
+    }
+}
+function Start-LogScan { Start-LogOperation 'Scan' $null '' }
+function Start-LogRead($Group, [string]$Path) { Start-LogOperation 'Read' $Group $Path }
+function Complete-LogOperation {
+    $job = $script:LogJob
+    $script:LogJob = $null
+    $btnLogRefresh.IsEnabled = $true
+    foreach ($item in $script:LogGroups) { $item.List.IsEnabled = $true }
+    $result = $null
+    try { $result = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch { $result = [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $result) { $txtLogStatus.Text = 'The log operation returned no result.'; return }
+    if (-not $result.Ok) { $txtLogStatus.Text = "Log operation failed: $($result.Error)"; return }
+
+    if ($job.Mode -eq 'Scan') {
+        foreach ($group in $script:LogGroups) { $group.Files.Clear() }
+        foreach ($file in @($result.Files)) {
+            $target = $null
+            foreach ($group in $script:LogGroups) {
+                if ($group.Name -eq 'Other') { continue }
+                $matchesGroup = $false
+                if ($group.Name -eq 'POS') {
+                    $matchesGroup = ($file.Name -match '(?i)^pos') -or
+                        ($file.RelativePath -match '(?i)(^|[\\/._ -])pos([\\/._ -]|$)|point.?of.?sale')
+                } else {
+                    $matchesGroup = $file.RelativePath -match $group.Pattern
+                }
+                if ($matchesGroup) { $target = $group; break }
+            }
+            if (-not $target) { $target = $script:LogGroups | Where-Object { $_.Name -eq 'Other' } | Select-Object -First 1 }
+            if ($target) { $target.Files.Add($file) }
+        }
+        foreach ($group in $script:LogGroups) {
+            $group.Tab.Header = '{0} ({1})' -f $group.Label, $group.Files.Count
+        }
+        $script:LastLogScan = Get-Date
+        $count = @($result.Files).Count
+        if ($count -eq 0) {
+            $txtLogStatus.Text = "No supported text log files found in $($script:LogRoot)."
+        } else {
+            $txtLogStatus.Text = "Found $count log file(s) in $($script:LogRoot). Select a program and file; previews show up to the latest 5,000 lines."
+        }
+        return
+    }
+
+    $group = $job.Group
+    $group.Content = [string]$result.Text
+    $group.Lines = @(ConvertTo-LogLines $group.Content)
+    $tailNote = if ($result.Truncated) { ' (showing the latest 5,000 lines)' } else { '' }
+    $fileName = [IO.Path]::GetFileName([string]$result.Path)
+    $group.PathText.Text = "${fileName}  |  $([string]$result.Path)$tailNote"
+    Update-LogFilter $group
+}
+function ConvertTo-LogLines([string]$Text) {
+    $timestampPattern = '(?<!\d)(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{1,2}/\d{1,2}/\d{4}[ T]\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?)(?!\d)'
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($line in ($Text -split "`r?`n")) {
+        $timestamp = $null
+        $timestampMatch = [regex]::Match($line, $timestampPattern)
+        if ($timestampMatch.Success) {
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParse($timestampMatch.Value, [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+                $timestamp = $parsed
+            }
+        }
+        $severity = 'Other'
+        if ($line -match '(?i)\b(error|err|fatal|critical|exception|fail(?:ed|ure)?)\b') { $severity = 'Error' }
+        elseif ($line -match '(?i)\b(warn(?:ing)?|wrn)\b') { $severity = 'Warning' }
+        [void]$entries.Add([PSCustomObject]@{ Text = $line; Timestamp = $timestamp; Severity = $severity })
+    }
+    return $entries.ToArray()
+}
+function Update-LogFilter($Group) {
+    if (-not $Group) {
+        $tab = $LogProgramTabs.SelectedItem
+        if (-not $tab -or -not $tab.Tag) { return }
+        $Group = $tab.Tag
+    }
+    if (-not $Group.Content) { return }
+    $severityFilter = 'All'
+    if ($cmbLogSeverity.SelectedItem) { $severityFilter = [string]$cmbLogSeverity.SelectedItem.Tag }
+    $timeFilter = 'All'
+    if ($cmbLogTime.SelectedItem) { $timeFilter = [string]$cmbLogTime.SelectedItem.Tag }
+    $now = Get-Date
+    $visible = @($Group.Lines | Where-Object {
+        $entry = $_
+        $severityMatch = $true
+        if ($severityFilter -eq 'Error') { $severityMatch = ($entry.Severity -eq 'Error') }
+        elseif ($severityFilter -eq 'Warning') { $severityMatch = ($entry.Severity -eq 'Warning') }
+        elseif ($severityFilter -eq 'ErrorWarning') { $severityMatch = ($entry.Severity -in @('Error', 'Warning')) }
+        $timeMatch = $true
+        if ($timeFilter -ne 'All') {
+            $timeMatch = $false
+            if ($null -ne $entry.Timestamp) {
+                switch ($timeFilter) {
+                    'Hour' { $timeMatch = $entry.Timestamp -ge $now.AddHours(-1) }
+                    'Day' { $timeMatch = $entry.Timestamp -ge $now.AddHours(-24) }
+                    'Today' { $timeMatch = $entry.Timestamp.Date -eq $now.Date }
+                }
+            }
+        }
+        $severityMatch -and $timeMatch
+    })
+    $Group.Viewer.Text = [string]::Join([Environment]::NewLine, [string[]]@($visible | ForEach-Object { $_.Text }))
+    $Group.Viewer.CaretIndex = 0
+    $Group.Viewer.ScrollToHome()
+    $timestampCount = @($Group.Lines | Where-Object { $null -ne $_.Timestamp }).Count
+    $errorCount = @($Group.Lines | Where-Object { $_.Severity -eq 'Error' }).Count
+    $warningCount = @($Group.Lines | Where-Object { $_.Severity -eq 'Warning' }).Count
+    $txtLogStatus.Text = "Showing $($visible.Count) of $($Group.Lines.Count) lines; detected $timestampCount timestamps, $errorCount errors, and $warningCount warnings."
+}
+function Find-LogText {
+    $query = $txtLogSearch.Text
+    if (-not $query) { $txtLogStatus.Text = 'Enter text to find in the selected log.'; return }
+    $tab = $LogProgramTabs.SelectedItem
+    if (-not $tab -or -not $tab.Tag -or -not $tab.Tag.Content) { $txtLogStatus.Text = 'Select and load a log file first.'; return }
+    $viewer = $tab.Tag.Viewer
+    $start = $viewer.SelectionStart + [Math]::Max(1, $viewer.SelectionLength)
+    if ($start -ge $viewer.Text.Length) { $start = 0 }
+    $index = $viewer.Text.IndexOf($query, $start, [StringComparison]::OrdinalIgnoreCase)
+    if ($index -lt 0 -and $start -gt 0) { $index = $viewer.Text.IndexOf($query, 0, [StringComparison]::OrdinalIgnoreCase) }
+    if ($index -lt 0) { $txtLogStatus.Text = "'$query' was not found in the displayed log lines."; return }
+    $viewer.Focus()
+    $viewer.Select($index, $query.Length)
+    $viewer.ScrollToLine($viewer.GetLineIndexFromCharacterIndex($index))
+    $lineNumber = $viewer.GetLineIndexFromCharacterIndex($index) + 1
+    $txtLogStatus.Text = "Found '$query' on displayed line $lineNumber."
+}
+$btnLogRefresh.Add_Click({ Start-LogScan })
+$btnLogFind.Add_Click({ Find-LogText })
+$cmbLogSeverity.Add_SelectionChanged({ Update-LogFilter })
+$cmbLogTime.Add_SelectionChanged({ Update-LogFilter })
+$txtLogSearch.Add_KeyDown({ if ($_.Key -eq 'Return') { Find-LogText } })
 # ------------------------------------------------------------
 # READERS TAB (swiper units + reader units) - read-only
 # Swiper_Units -> Game_Swipers (Game_Id) for the description and retired flag (Game_Master_List for the game's retired flag).
@@ -5933,6 +6288,7 @@ $script:Timer.Add_Tick({
     if ($script:DbVerJob    -and $script:DbVerJob.Handle.IsCompleted)    { Complete-DbVersionCheck }
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
     if ($script:SqlMaintenanceJob -and $script:SqlMaintenanceJob.Handle.IsCompleted) { Complete-SqlMaintenance }
+    if ($script:LogJob      -and $script:LogJob.Handle.IsCompleted)      { Complete-LogOperation }
     if ($script:ReaderJob   -and $script:ReaderJob.Handle.IsCompleted)   { Complete-ReaderLoad }
     if ($script:RdPingJob   -and $script:RdPingJob.Handle.IsCompleted)   { Complete-ReaderPing }
     if ($script:RdpJob      -and $script:RdpJob.Handle.IsCompleted)      { Complete-RdpConnect }
@@ -5989,6 +6345,7 @@ $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
 Initialize-SqlMaintenanceUi
+Initialize-LogTabs
 Initialize-DeviceIntervalUi
 Start-DbVersionCheck
 Initialize-ApUi
