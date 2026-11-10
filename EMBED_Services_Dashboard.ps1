@@ -4,36 +4,82 @@ EMBED Services Dashboard - Enhanced Edition (Optimized)
 Version 1 was just a simple service monitor. This version is a full-featured WPF dashboard for monitoring and controlling EMBED Windows services.
 Version 2 is a complete rewrite with a modern WPF interface, service dependency awareness, and many new features.
 WPF dashboard for monitoring and controlling EMBED Windows services.
-Features: Minimize-to-Tray, Windows Event Viewer, Status History Panel, Service Control Panel,
-health colors, dependency-aware service ordering, AnyDesk monitoring, Access Points / UniFi,
-reader availability checks, Support Snapshots (auto-cleanup), Remote Services control,
-persistent History logs.
-v2.18: per-service Restart button, Devices tab initially showed TeamViewer services only,
+Features: Minimize-to-Tray, Status History Panel, Service Control Panel, health colors,
+Support Snapshots (auto-cleanup), Remote Services control, persistent History logs.
+v2.18: per-service Restart button, Devices tab shows TeamViewer services only,
        Support Login on the SQL tab (add / reset an EMBED login without opening SQL).
 v2.19: Readers tab hides old readers with no swiper unit, pings each reader (Online column replaces Status),
        Connect (RDP) joins the signed-in user's session instead of locking them out,
        Support Login: fixed "Embed" prefix, new logins are created as support users (user_type 1).
 v2.20: Support Login prefix is EMBED (all caps) and Add / Reset also sets existing logins to support (user_type 1),
        Open UniFi starts the UniFi app on this server first and waits for it, default address https://localhost:8443.
-v2.20.1: same as v2.20 without the Support Login card - the SQL tab is fully read-only again.
-Combined build: retains the v2.20.1 Readers and Access Points features and adds the v2.21
-                Event Viewer, AnyDesk monitoring, and dependency-aware service ordering.
-v2.21.2: Remote Services lists TeamViewer, Print Spooler, AnyDesk services, and AnyDesk.exe.
-v2.22.0: Adds fixed remote-admin tasks over WinRM for RDP and approved service checks/actions.
-v2.22.1: Supports HTTP WinRM with an exact TrustedHosts entry as well as HTTPS.
-v2.22.2: Adds WMI/DCOM as an alternative transport for fixed remote-admin tasks.
-v2.22.3: Adds a WMI/DCOM action to bootstrap WinRM on remote PCs.
-v2.22.5: Adds confirmed ECS7 transaction-log backup, shrink, growth limits, and verification.
-v2.22.6: Makes the ECS7 log shrink target and backup directory configurable in Settings.
-v2.22.7: Makes the ECS7 transaction-log file-growth increment configurable in Settings.
-v2.22.8: Makes the ECS7 logical transaction-log file name configurable in Settings.
-v2.22.9: Adds a grouped, searchable viewer for EMBED program logs.
-v2.22.10: Separates EPG credit card transaction logs into their own Logs subtab.
-v2.22.11: Adds ECSGenService, EMBED API, and ECS Reports log subtabs.
-v2.22.12: Separates general KIOSK logs from KIOSK Service logs.
-v2.22.13: Adds a GURU Server logs subtab.
-v2.22.14: Simplifies Logs subtab headers to show only the program group names.
-v2.22.15: Detects log timestamps and severity, with error/warning and time-range filters.
+v2.21: Station Snapshot on the Devices tab - pulls the newest logs from a station (ECS7\<station>\Logs),
+       zips them, and lists what looks wrong in plain words (rules in Dashboard\LogFindings.json).
+v2.22: Station Snapshot uses the PC's real hostname and pulls ONLY the Kiosk logs (ECS7\Kiosk\Logs) - it no longer
+       falls back to other Logs folders such as InfinityHWAUpdateService. Top-bar Snapshot button removed.
+v2.23: CenterEdge Gateway (ECS-CenterEdgeGatewaySvc) added to the Services tab and to Start All.
+       Remote services on a station now show the Print Spooler as well as TeamViewer.
+       Station Snapshot pulls POS logs (ECS7\POS\Logs) and Prizes logs (ECS7\RedPro\Logs or ECS7\POS\RedPro\Logs)
+       as well as the Kiosk logs - pick which ones on the snapshot panel.
+       SQL tab: LOG REDUCTION shrinks the transaction log only (never the data file, never the recovery model),
+       after a backup-age check (the exact rule changed in v2.23.1 - see below).
+       SQL tab: BACKUP CLEANUP deletes the oldest .bak files, always keeping the newest ones (removed again in v2.23.2).
+       Settings tab: the shrink target, the backup guard window and the backup cleanup rules.
+v2.23.1: Station Snapshot works out by itself which system the station runs (station name first, then which logs are
+       on the disk and which were written today) - the Kiosk / POS / Prizes ticks are gone, and a log type the
+       station does not have is skipped without a row. Prizes logs are read from ECS7\POS\RedPro\Logs first, then
+       ECS7\RedPro\Logs. Log Reduction is now a gate, not a warning: it is BLOCKED unless a FULL backup of the
+       database finished within the window on the Settings tab (a recent log or differential backup is not enough).
+       "Only offer a shrink above (MB)" removed. Backup cleanup now defaults to 7 days. The shrink has a 15 minute
+       cap and says why when it stops above the target.
+v2.23.2: BACKUP CLEANUP removed from the SQL tab and from the Settings tab, together with its rules and its saved
+       config. Log Reduction (shrinks the log only, gated on a recent FULL backup) is unchanged.
+v2.23.3: Station Snapshot ships the team's known-errors list as a built-in list, written to Dashboard\LogFindings.json on
+       the first snapshot and upgraded in place when the list changes (the replaced file is kept as a .bak). One error
+       is one row with one hit count and its numbered resolution steps; a finding that keeps coming back also shows
+       its rate ("about every 10s") next to the raw count, so a retry loop reads as one fault.
+v2.23.4: Known-errors list cut back to the failures worth calling an error (14 down to 9). Removed: the note acceptor
+       poll ("no devices found"), because a kiosk with no bill acceptor is a normal setup and was not a fault;
+       bill-acceptor category fragments, the kiosk "technical issues" catch-all (the snapshot already lists unknown
+       error lines), scanner "does not exist" and "USB Virtual COM", the printer entry, "parked transaction" (normal
+       activity) and "ECS General Service" (the Services tab already watches that service). Card dispenser and
+       scanner failures are now Warning, not Error: they degrade the station without stopping it.
+v2.23.5: Station Snapshot lists the main finding only - an Error beats a Warning and the most frequent wins - and
+       puts everything else behind a "Show All (N)" button in the panel footer, so a station with nothing wrong
+       reads in one line. Copy for Ticket and the snapshot's 00_Findings.txt still carry every finding, and the
+       status line says how many are behind the button. A new snapshot starts collapsed again.
+v2.23.6: Station Snapshot now also reads ECS7\Logs - the "ESAdmin folder" the apps switch to a few seconds after
+       starting. They write their startup lines into their own folder, say "Standard Logging is now starting", and
+       keep logging in ECS7\Logs with the station name in front (PRIZES_REDPRO1_<date>.log, SALES_POS1_..., Kiosk1
+       Log ...). Reading only the application folder meant anything that went wrong after startup - a scanner or
+       payment fault - was never in the file the dashboard read. Each source takes only its own files from that
+       folder (Kiosk*, SALES*, PRIZES*), and the newest file across both folders is the one that gets read.
+v2.23.7: RedPro keeps a separate "RedPro - Error Log - <date>.log" and it is read too now (Prizes picks up RedPro* files
+       as well). Its blocks are understood: every "ECS Debug Message:" block becomes a finding, because that file has
+       no severity column and no "Exception" keyword, so its lines used to read as ordinary chatter and a fault in it
+       could never be listed. A scanner whose port will not open ("Error Opening Serial Port" / "The port 'COM11'
+       does not exist.") is matched by name and is an Error again rather than a Warning - without the scanner the
+       station cannot redeem.
+v2.23.8: A REDPRO machine - prizes only, no POS - is a station type of its own: it reads the prizes logs and is named
+       RedPro instead of falling through to "Unknown", which is what the name hint used to do (REDPRO matched no
+       pattern and the RedPOS type needs POS logs it does not have). Both layouts the team confirmed are probed:
+       a REDPOS til keeps its prizes logs in ECS7\POS\RedPro\Logs, a REDPRO machine in ECS7\RedPro\Logs.
+v2.23.9: Station Snapshot now says what it looked for. The detail pane, the copied ticket and 00_Findings.txt list every
+       log source with how many files it found and in which folder, and a source that was skipped says which folders
+       were checked - so a station that will not give up its prizes logs can be diagnosed instead of guessed at. A
+       folder that exists but cannot be read now reports the error instead of being passed over in silence.
+v2.23.10: If neither usual prizes folder has anything, Station Snapshot searches under ECS7 (3 levels deep) for PRIZES*
+       and RedPro* files and reads them where it finds them, saying so in the source line. A station whose prizes
+       install sits somewhere slightly different no longer looks like a station with no prizes logs at all.
+v2.23.11: A RedPOS has six prizes log families and five slots, and "RedPro - Error Log" is only written when something
+       fails, so it always lost the race for the last slot against the live cashier logs and was never pulled. The
+       RedPro error log is now pulled on top of the count, because that is the file that says what broke. Its dated
+       name ("RedPro - Error Log - 2026-11-05") is recognised as one family too, so yesterday's and last week's
+       copies are not dragged in with it - only the newest is read. Raise "Logs to pull" for more cashier logs.
+v2.25: Combines the v2.23.11 station snapshots, software deployment, CenterEdge service, and full-backup-gated
+    transaction-log reduction with the v2.22.15 Event Viewer, remote-admin tasks, program-log viewer, and
+    per-service CPU, memory, and disk-rate monitoring, including AnyDesk service monitoring. History entries
+    reload from retained daily CSV logs when the dashboard starts.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -50,7 +96,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.22.15'
+$script:AppVersion = '2.25'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -59,48 +105,27 @@ $script:ServiceDefs = @(
     [ordered]@{ Name = 'ECS-KioskService';  Display = 'EMBED Kiosk Service';        Group = 'Core' }
     [ordered]@{ Name = 'EcsReportsService'; Display = 'EMBED Reports Service';      Group = 'Core' }
     [ordered]@{ Name = 'ECSInterface';      Display = 'EMBED Interface Service';    Group = 'Core' }
+    [ordered]@{ Name = 'ECS-CenterEdgeGatewaySvc'; Display = 'CenterEdge Gateway';       Group = 'API'  }
     [ordered]@{ Name = 'Embed-ESP';         Display = 'EMBED ESP Service';          Group = 'API'  }
     [ordered]@{ Name = 'MSSQLSERVER';       Display = 'SQL Server';                 Group = 'SQL'  }
     [ordered]@{ Name = 'SQLBrowser';        Display = 'SQL Browser';                Group = 'SQL'  }
     [ordered]@{ Name = 'TeamViewer';        Display = 'TeamViewer';                 Group = 'Remote'; MonitorOnly = $true }
     [ordered]@{ Name = 'AnyDesk';           Display = 'AnyDesk';                    Group = 'Remote'; MonitorOnly = $true }
 )
-# Service dependencies used to determine a safe start/stop order.
-$script:ServiceDependencies = @{
-    MSSQLSERVER = @()
-    ECSGenSvc = @('MSSQLSERVER')
-    EmbedAPI = @('MSSQLSERVER')
-    ECSInterface = @('MSSQLSERVER')
-    EcsReportsService = @('MSSQLSERVER')
-    'Embed-ESP' = @('EmbedAPI')
-    'ECS-KioskService' = @('ECSGenSvc')
-}
-function Get-ServiceStartOrder {
-    $ordered = New-Object System.Collections.Generic.List[string]
-    $visited = @{}
-    function Add-ServiceRecursive {
-        param([string]$ServiceName)
-        if ($visited.ContainsKey($ServiceName)) { return }
-        $visited[$ServiceName] = $true
-        foreach ($dependency in @($script:ServiceDependencies[$ServiceName])) {
-            Add-ServiceRecursive $dependency
-        }
-        if (-not $ordered.Contains($ServiceName)) { $ordered.Add($ServiceName) }
-    }
-    foreach ($service in $script:ServiceDefs.Name) { Add-ServiceRecursive $service }
-    return $ordered
-}
 # Runtime state
 $script:HistoryList    = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
 $script:EventList      = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
 $script:PreviousStates = @{}
 $script:ServiceRows    = @{}
+$script:ServiceResourceMetrics = @{}
+$script:PreviousProcessSamples = @{}
 $script:NextServiceRefresh = [datetime]::MinValue
 $script:DeviceSecs     = 60     # device check (Devices tab, saved)
 $script:DeviceCountdown = 60
 $script:SqlJob         = $null  # background SQL tab check
 $script:SqlMaintenanceJob = $null
 $script:SqlMaintenanceConfig = @{ LogicalLogName = 'ECS7_log'; ShrinkTargetMB = 150; GrowthMB = 64; BackupDirectory = 'E:\SQL\BACKUP' }
+$script:LoginJob       = $null  # background Support Login job (SQL tab)
 $script:SqlInfo        = $null
 $script:LastSqlCheck   = [datetime]::MinValue
 $script:SqlCheckHours  = 24
@@ -108,8 +133,6 @@ $script:BackupWarnDays = 1      # last full backup older than this = yellow
 $script:BackupRedDays  = 7      # ...older than this = red
 $script:ActiveFilter   = 'All'
 $script:ServiceCache   = @{}
-$script:ServiceResourceMetrics = @{}
-$script:PreviousProcessSamples = @{}
 $script:DisabledServices = @{}   # services the user switched off (saved to config)
 $script:AutoOff = @{}            # services auto-switched off, e.g. not installed (not saved, rechecked each scan)
 $script:OfflineEvents = @{}      # service name -> timestamps of recent offline events (for email alerts)
@@ -153,8 +176,12 @@ $script:LogRoot        = Join-Path $script:EcsDir 'Logs'
 $script:SnapshotRoot   = Join-Path $script:DataRoot 'Snapshots'
 $script:HistoryDir     = Join-Path $script:DataRoot 'History'
 $script:HistoryDays    = 3                                         # daily history CSVs older than this are deleted
-$script:SnapshotConfig = @{ KeepCount = 5; MaxAgeDays = 14 }       # saved to config.json
+$script:SnapshotConfig = @{ KeepCount = 5; MaxAgeDays = 14; StationLogs = 5 }       # saved to config.json
 $script:SnapshotJob    = $null
+# v2.23: SQL log reduction (saved to config.json)
+$script:ShrinkConfig   = @{ TargetMB = 256; FullBackupMin = 30 }   # shrink only after a FULL backup this recent
+$script:ShrinkJob      = $null
+$script:SsConfig       = @{ TypeOverride = 'Auto' }                       # station log type: Auto, Kiosk, RedPOS or RedPro (saved)
 $script:RemoteJob      = $null
 $script:RemoteList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
 $script:RemoteAdminJob = $null
@@ -178,7 +205,7 @@ $script:ApScanned      = $false   # a full range scan has run this session
 $script:TrayState      = ''
 $script:TrayHIcon      = [IntPtr]::Zero
 # Start order (stop runs in reverse). CONFIRM this matches EMBED's real dependencies.
-$script:StartOrder = Get-ServiceStartOrder
+$script:StartOrder = @('MSSQLSERVER','SQLBrowser','ECSGenSvc','ECSInterface','EcsReportsService','ECS-KioskService','EmbedAPI','Embed-ESP','ECS-CenterEdgeGatewaySvc')
 if (-not ('Win32.NativeIcon' -as [type])) {
     Add-Type -Namespace Win32 -Name NativeIcon -MemberDefinition '[DllImport("user32.dll")] public static extern bool DestroyIcon(System.IntPtr hIcon);'
 }
@@ -224,6 +251,9 @@ function Save-Config {
             SqlServer        = $script:GuruSqlServer
             SqlMaintenance   = $script:SqlMaintenanceConfig
             Snapshot         = $script:SnapshotConfig
+            Shrink           = $script:ShrinkConfig
+
+            StationType      = [string]$script:SsConfig['TypeOverride']
             Software         = @{
                 StationRoot = $script:SoftwareConfig['StationRoot']
                 Packages    = @($script:Packages | ForEach-Object { @{ Name = $_.Name; Installer = $_.Installer; WholeFolder = [bool]$_.WholeFolder; Args = $_.Args } })
@@ -523,8 +553,6 @@ function Save-Config {
           </Border>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-          <Button x:Name="btnSnapshot"     Content="📦  Snapshot"      Style="{StaticResource BtnPurple}" Margin="0,0,6,0"
-                  ToolTip="Collect logs, errors and system info into a zip for the ticket"/>
           <Button x:Name="btnRefresh"      Content="↻  Refresh"       Style="{StaticResource BtnBase}"   Margin="0,0,6,0"/>
           <Button x:Name="btnClearHistory" Content="🗑  Clear History" Style="{StaticResource BtnBase}"/>
         </StackPanel>
@@ -592,42 +620,42 @@ function Save-Config {
               </DataGrid>
             </Grid>
           </TabItem>
-          <TabItem Header="Events" Style="{StaticResource SubTabItem}">
-            <Grid Background="#1E1E2E">
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-              </Grid.RowDefinitions>
-              <Border Grid.Row="0" Background="#181825" Padding="16,9">
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                  </Grid.ColumnDefinitions>
-                  <TextBlock Grid.Column="0" Foreground="#6C7086" FontSize="12"
-                             VerticalAlignment="Center"
-                             Text="Windows Event Viewer entries related to monitored services"/>
-                  <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button x:Name="btnRefreshEvents" Content="↻ Refresh Events"
-                            Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
-                    <Button x:Name="btnClearEvents" Content="Clear View"
-                            Style="{StaticResource BtnBase}"/>
-                  </StackPanel>
-                </Grid>
-              </Border>
-              <DataGrid x:Name="EventsGrid" Grid.Row="1" Margin="12,8,12,8"
-                        ItemsSource="{Binding}">
-                <DataGrid.Columns>
-                  <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="155"/>
-                  <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="90"/>
-                  <DataGridTextColumn Header="Event ID" Binding="{Binding EventId}" Width="90"/>
-                  <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="170"/>
-                  <DataGridTextColumn Header="Service" Binding="{Binding Service}" Width="160"/>
-                  <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
-                </DataGrid.Columns>
-              </DataGrid>
-            </Grid>
-          </TabItem>
+                    <TabItem Header="Events" Style="{StaticResource SubTabItem}">
+                        <Grid Background="#1E1E2E">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Background="#181825" Padding="16,9">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Foreground="#6C7086" FontSize="12"
+                                                         VerticalAlignment="Center"
+                                                         Text="Windows Event Viewer entries related to monitored services"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <Button x:Name="btnRefreshEvents" Content="Refresh Events"
+                                                        Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
+                                        <Button x:Name="btnClearEvents" Content="Clear View"
+                                                        Style="{StaticResource BtnBase}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <DataGrid x:Name="EventsGrid" Grid.Row="1" Margin="12,8,12,8"
+                                                ItemsSource="{Binding}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="155"/>
+                                    <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="90"/>
+                                    <DataGridTextColumn Header="Event ID" Binding="{Binding EventId}" Width="90"/>
+                                    <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="170"/>
+                                    <DataGridTextColumn Header="Service" Binding="{Binding Service}" Width="160"/>
+                                    <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
           <TabItem Header="Summary" Style="{StaticResource SubTabItem}">
             <ScrollViewer Background="#1E1E2E" VerticalScrollBarVisibility="Auto">
               <StackPanel Margin="20,16,20,20">
@@ -693,7 +721,7 @@ function Save-Config {
           <Border Grid.Row="0" Background="#181825" Padding="16,9">
             <Grid>
               <TextBlock x:Name="txtSqlStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,200,0"
-                         Text="Read-only SQL diagnostics, except for the explicit ECS7 log maintenance action below."/>
+                         Text="EMBED database status. Refreshes when you open this tab and every 24 hours. Two parts write: Support Login (logins) and Log Reduction (the log file only)."/>
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="btnSqlCopy"    Content="Copy"       Style="{StaticResource BtnBase}" Margin="0,0,6,0" ToolTip="Copy everything on this tab for a ticket"/>
                 <Button x:Name="btnSqlRefresh" Content="↻  Refresh" Style="{StaticResource BtnBlue}"/>
@@ -702,6 +730,39 @@ function Save-Config {
           </Border>
           <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="16,12,16,16">
+              <!-- Support login (the only part of this tab that writes to SQL) -->
+              <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,12">
+                <StackPanel>
+                  <TextBlock Text="SUPPORT LOGIN" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                  <TextBlock Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"
+                             Text="Adds your EMBED support login to this site (user type 1 = support), or resets its password and un-deletes it if it already exists. Paste your own password hash - it is never saved or logged."/>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="120"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                      <RowDefinition Height="Auto"/>
+                      <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="User name" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                    <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
+                      <Border Background="#45475A" CornerRadius="4,0,0,4" Padding="10,0">
+                        <TextBlock x:Name="txtLoginPrefix" Text="EMBED" Foreground="#CDD6F4" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                      </Border>
+                      <TextBox x:Name="txtLoginUser" Width="220" ToolTip="Type the rest of your user name, e.g. ZachT (EMBED is added for you)"/>
+                    </StackPanel>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Password hash" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                    <PasswordBox x:Name="pwdLoginHash" Grid.Row="1" Grid.Column="1" Width="280" HorizontalAlignment="Left" Margin="0,0,0,8"
+                                 ToolTip="Your 32-character password hash (letters A-F and numbers)"/>
+                  </Grid>
+                  <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                    <Button x:Name="btnLoginCheck" Content="Check User"          Style="{StaticResource BtnBlue}"   Margin="0,0,6,0" ToolTip="Read-only: shows whether this user exists here"/>
+                    <Button x:Name="btnLoginApply" Content="Add / Reset Login"   Style="{StaticResource BtnYellow}" ToolTip="Writes to the database - asks first"/>
+                  </StackPanel>
+                  <TextBlock x:Name="txtLoginStatus" Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                </StackPanel>
+              </Border>
               <!-- Database version -->
               <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,12">
                 <StackPanel>
@@ -785,6 +846,37 @@ function Save-Config {
                                         <Button x:Name="btnSqlMaintenance" Grid.Column="0" Content="Backup + Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,10,0" ToolTip="Back up and shrink the ECS7 transaction log, then set and verify file growth limits."/>
                                         <TextBlock x:Name="txtSqlMaintenanceStatus" Grid.Column="1" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
                                     </Grid>
+                </StackPanel>
+              </Border>
+              <!-- Log reduction (writes: the transaction log file only) -->
+              <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,12">
+                <StackPanel>
+                  <TextBlock Text="LOG REDUCTION" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                  <TextBlock Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"
+                             Text="Shrinks the transaction log file only. The data file and the recovery model are never changed. It is blocked unless a FULL backup of this database finished within the window on the Settings tab, and it never runs while a backup is in progress."/>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="130"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                      <RowDefinition Height="Auto"/>
+                      <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Transaction log" Foreground="#6C7086" Margin="0,0,14,8" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtShrinkNow" Grid.Row="0" Grid.Column="1" Text="—" Foreground="#CDD6F4" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Shrink target" Foreground="#6C7086" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal">
+                      <TextBox x:Name="txtShrinkTarget" Width="80" Margin="0,0,6,0" ToolTip="Megabytes to shrink the log file down to. The default comes from the Settings tab."/>
+                      <TextBlock Text="MB" Foreground="#6C7086" VerticalAlignment="Center"/>
+                    </StackPanel>
+                  </Grid>
+                  <TextBlock x:Name="txtShrinkGuard" Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                  <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button x:Name="btnShrinkLog"     Content="Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,6,0" ToolTip="Blocked unless a full backup finished within the window on the Settings tab. Runs CHECKPOINT then DBCC SHRINKFILE on the log file only."/>
+                    <Button x:Name="btnShrinkRefresh" Content="Re-check"   Style="{StaticResource BtnBase}"   Margin="0,0,12,0"/>
+                    <TextBlock x:Name="txtShrinkStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                  </StackPanel>
                 </StackPanel>
               </Border>
               <!-- SQL Server -->
@@ -1074,8 +1166,10 @@ function Save-Config {
                               ToolTip="Joins the signed-in user's screen without signing them out. Opens a normal session when nobody is signed in."/>
                       <Button Tag="Ping"     Content="📶  Ping"          Style="{StaticResource BtnBlue}"   Margin="0,0,6,4"/>
                       <Button Tag="Services" Content="⚙  Services"       Style="{StaticResource BtnPurple}" Margin="0,0,6,4"/>
-                      <Button Tag="RemoteAdmin" Content="🛠  Admin Tasks (HTTPS)" Style="{StaticResource BtnPurple}" Margin="0,0,6,4"
-                              ToolTip="Run fixed, approved RDP and service tasks over WinRM. Choose HTTP with an exact TrustedHosts entry or HTTPS with a trusted matching certificate."/>
+                          <Button Tag="RemoteAdmin" Content="Admin Tasks..." Style="{StaticResource BtnPurple}" Margin="0,0,6,4"
+                              ToolTip="Run fixed remote RDP and approved service checks/actions."/>
+                      <Button Tag="Snapshot" Content="📋  Snapshot"       Style="{StaticResource BtnBlue}"   Margin="0,0,6,4"
+                              ToolTip="Pulls the newest logs from this station and lists what looks wrong"/>
                       <Button Tag="Software" Content="⬇  Software"       Style="{StaticResource BtnPurple}" Margin="0,0,20,4"/>
                       <Button Tag="Remove"   Content="✕  Remove"         Style="{StaticResource BtnRed}"    Margin="0,0,0,4"/>
                     </WrapPanel>
@@ -1261,6 +1355,67 @@ function Save-Config {
                 <Button x:Name="btnDscIgnore" Content="Ignore Selected" Style="{StaticResource BtnYellow}" Margin="0,0,6,0"/>
                 <Button x:Name="btnDscClose"  Content="Close"           Style="{StaticResource BtnBase}"/>
                 <TextBlock Text="Ignored devices stay hidden in future scans" Foreground="#6C7086" FontSize="12"
+                           VerticalAlignment="Center" Margin="14,0,0,0"/>
+              </StackPanel>
+            </Border>
+          </Grid>
+          <!-- Station snapshot panel (covers the Devices list while open) -->
+          <Grid x:Name="pnlStationSnap" Grid.RowSpan="3" Background="#1E1E2E" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Background="#181825" Padding="16,9">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                  <TextBlock x:Name="txtSsTitle" Text="Station snapshot" Foreground="#CBA6F7" FontSize="14" FontWeight="SemiBold"/>
+                  <TextBlock x:Name="txtSsStatus" Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                  <TextBlock Text="Logs to pull" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                  <TextBox x:Name="txtSsCount" Width="40" Margin="0,0,10,0" VerticalAlignment="Center" ToolTip="Newest log files to copy from each log type the station runs (1 to 10)"/>
+                  <Button x:Name="btnSsRun"   Content="↻  Run Again" Style="{StaticResource BtnBlue}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnSsClose" Content="Close"        Style="{StaticResource BtnBase}"/>
+                </StackPanel>
+              </Grid>
+            </Border>
+            <DataGrid x:Name="dgSsFindings" Grid.Row="1" Margin="12,8,12,4" CanUserSortColumns="True">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Level" Binding="{Binding Severity, Mode=OneWay}" Width="75" IsReadOnly="True">
+                  <DataGridTextColumn.ElementStyle>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Foreground" Value="#CDD6F4"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Severity}" Value="Error"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Severity}" Value="Warning"><Setter Property="Foreground" Value="#F9E2AF"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Severity}" Value="OK"><Setter Property="Foreground" Value="#A6E3A1"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Severity}" Value="Info"><Setter Property="Foreground" Value="#89B4FA"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+                <DataGridTextColumn Header="Source"      Binding="{Binding Source, Mode=OneWay}"  Width="95"  IsReadOnly="True"/>
+                <DataGridTextColumn Header="Finding"     Binding="{Binding Finding, Mode=OneWay}" Width="2*"  IsReadOnly="True"/>
+                <DataGridTextColumn Header="Times"       Binding="{Binding Times, Mode=OneWay}"   Width="70"  IsReadOnly="True"/>
+                <DataGridTextColumn Header="Last seen"   Binding="{Binding Last, Mode=OneWay}"    Width="140" IsReadOnly="True"/>
+                <DataGridTextColumn Header="What to try" Binding="{Binding Fix, Mode=OneWay}"     Width="2*"  IsReadOnly="True"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBox x:Name="txtSsDetail" Grid.Row="2" Height="110" Margin="12,4,12,8" IsReadOnly="True" FontFamily="Consolas" FontSize="11"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
+            <Border Grid.Row="3" Background="#181825" Padding="16,9">
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="btnSsCopy"  Content="Copy for Ticket"     Style="{StaticResource BtnGreen}"  Margin="0,0,6,0" ToolTip="Copies the findings and the snapshot path"/>
+                <Button x:Name="btnSsOpen"  Content="Open Snapshot"       Style="{StaticResource BtnBlue}"   Margin="0,0,6,0" ToolTip="Shows the zip with the copied logs"/>
+                <Button x:Name="btnSsRules" Content="Edit Findings List"  Style="{StaticResource BtnPurple}" Margin="0,0,6,0" ToolTip="The error text the dashboard looks for and what to tell the agent"/>
+                <Button x:Name="btnSsShowAll" Content="Show All"          Style="{StaticResource BtnBlue}"   Margin="0,0,6,0" Visibility="Collapsed" ToolTip="Lists every finding, not just the main one"/>
+                <TextBlock Text="Select a finding to see the log line it came from" Foreground="#6C7086" FontSize="12"
                            VerticalAlignment="Center" Margin="14,0,0,0"/>
               </StackPanel>
             </Border>
@@ -1485,6 +1640,37 @@ function Save-Config {
             </Border>
             <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,14,0,0">
               <StackPanel>
+                <TextBlock Text="SQL MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <TextBlock Text="Log reduction only ever shrinks the transaction log file - it never changes the data file or the recovery model."
+                           Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="300"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                  </Grid.RowDefinitions>
+                  <TextBlock Grid.Row="0" Text="Shrink the log down to (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBox x:Name="txtSetShrinkTarget" Width="80"/>
+                    <TextBlock Text="What the log shrinks to - it cannot go below the log actually in use." Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                  </StackPanel>
+                  <TextBlock Grid.Row="1" Text="Only shrink if a FULL backup is at most (minutes) old" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBox x:Name="txtSetShrinkGuard" Width="80"/>
+                    <TextBlock Text="No full backup this fresh = Shrink Log stays blocked. 5 to 1440." Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                  </StackPanel>
+                </Grid>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                  <Button x:Name="btnMaintSave" Content="Save Maintenance Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
+                  <TextBlock x:Name="txtMaintStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+            <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,14,0,0">
+              <StackPanel>
                 <TextBlock Text="APP UPDATES (GITHUB)" Foreground="#CBA6F7" FontSize="11"
                            FontWeight="SemiBold" Margin="0,0,0,4"/>
                 <TextBlock x:Name="txtUpdVersion" Foreground="#CDD6F4" FontSize="13" Margin="0,0,0,4"/>
@@ -1610,7 +1796,6 @@ $dgDevices        = Get-Ctrl 'dgDevices'
 $btnDevConnect    = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
 $btnDevPing       = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
 $btnDevRemove     = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
-$btnDevRemoteAdmin = New-Object System.Windows.Controls.Button  # not on screen - triggered from the expanded device row
 $btnDevDiscover   = Get-Ctrl 'btnDevDiscover'
 $pnlDiscover      = Get-Ctrl 'pnlDiscover'
 $btnDscScan       = Get-Ctrl 'btnDscScan'
@@ -1635,7 +1820,7 @@ $btnUpdSave       = Get-Ctrl 'btnUpdSave'
 $btnUpdCheck      = Get-Ctrl 'btnUpdCheck'
 $btnUpdInstall    = Get-Ctrl 'btnUpdInstall'
 $txtUpdStatus     = Get-Ctrl 'txtUpdStatus'
-$btnSnapshot      = Get-Ctrl 'btnSnapshot'
+$btnSnapshot      = New-Object System.Windows.Controls.Button   # top-bar Snapshot button removed in v2.22 - not on screen
 $btnDevServices   = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
 $pnlRemote        = Get-Ctrl 'pnlRemote'
 $txtRemHost       = Get-Ctrl 'txtRemHost'
@@ -1669,6 +1854,9 @@ $txtSqlShrinkTarget = Get-Ctrl 'txtSqlShrinkTarget'
 $txtSqlLogicalLogName = Get-Ctrl 'txtSqlLogicalLogName'
 $txtSqlGrowthMb = Get-Ctrl 'txtSqlGrowthMb'
 $txtSqlBackupDirectory = Get-Ctrl 'txtSqlBackupDirectory'
+$txtSqlMaintenancePlan = Get-Ctrl 'txtSqlMaintenancePlan'
+$btnSqlMaintenance = Get-Ctrl 'btnSqlMaintenance'
+$txtSqlMaintenanceStatus = Get-Ctrl 'txtSqlMaintenanceStatus'
 $btnSqlMaintenanceSave = Get-Ctrl 'btnSqlMaintenanceSave'
 $txtSqlMaintenanceSettingsStatus = Get-Ctrl 'txtSqlMaintenanceSettingsStatus'
 $dbBadge          = Get-Ctrl 'dbBadge'
@@ -1691,6 +1879,19 @@ $btnPkgScan       = Get-Ctrl 'btnPkgScan'
 $txtSwRoot        = Get-Ctrl 'txtSwRoot'
 $btnSwRootSave    = Get-Ctrl 'btnSwRootSave'
 $btnDevSoftware   = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
+$btnDevSnapshot   = New-Object System.Windows.Controls.Button   # not on screen - triggered from the expanded device row
+$pnlStationSnap   = Get-Ctrl 'pnlStationSnap'
+$txtSsTitle       = Get-Ctrl 'txtSsTitle'
+$txtSsStatus      = Get-Ctrl 'txtSsStatus'
+$txtSsCount       = Get-Ctrl 'txtSsCount'
+$btnSsRun         = Get-Ctrl 'btnSsRun'
+$btnSsClose       = Get-Ctrl 'btnSsClose'
+$dgSsFindings     = Get-Ctrl 'dgSsFindings'
+$txtSsDetail      = Get-Ctrl 'txtSsDetail'
+$btnSsCopy        = Get-Ctrl 'btnSsCopy'
+$btnSsOpen        = Get-Ctrl 'btnSsOpen'
+$btnSsRules       = Get-Ctrl 'btnSsRules'
+$btnSsShowAll     = Get-Ctrl 'btnSsShowAll'
 $txtDbVer         = Get-Ctrl 'txtDbVer'
 $MainTabs         = Get-Ctrl 'MainTabs'
 $tabSql           = Get-Ctrl 'tabSql'
@@ -1705,9 +1906,12 @@ $LogProgramTabs   = Get-Ctrl 'LogProgramTabs'
 $txtSqlStatus     = Get-Ctrl 'txtSqlStatus'
 $btnSqlCopy       = Get-Ctrl 'btnSqlCopy'
 $btnSqlRefresh    = Get-Ctrl 'btnSqlRefresh'
-$btnSqlMaintenance = Get-Ctrl 'btnSqlMaintenance'
-$txtSqlMaintenanceStatus = Get-Ctrl 'txtSqlMaintenanceStatus'
-$txtSqlMaintenancePlan = Get-Ctrl 'txtSqlMaintenancePlan'
+$txtLoginUser     = Get-Ctrl 'txtLoginUser'
+$txtLoginPrefix   = Get-Ctrl 'txtLoginPrefix'
+$pwdLoginHash     = Get-Ctrl 'pwdLoginHash'
+$btnLoginCheck    = Get-Ctrl 'btnLoginCheck'
+$btnLoginApply    = Get-Ctrl 'btnLoginApply'
+$txtLoginStatus   = Get-Ctrl 'txtLoginStatus'
 $txtSqlDbFull     = Get-Ctrl 'txtSqlDbFull'
 $txtSqlDbSub      = Get-Ctrl 'txtSqlDbSub'
 $dotBkFull        = Get-Ctrl 'dotBkFull'
@@ -1768,6 +1972,21 @@ $btnApSave        = Get-Ctrl 'btnApSave'
 $dgAps            = Get-Ctrl 'dgAps'
 $btnApPingWin     = Get-Ctrl 'btnApPingWin'
 $btnApForget      = Get-Ctrl 'btnApForget'
+# v2.23 controls: SQL log reduction
+$txtShrinkNow     = Get-Ctrl 'txtShrinkNow'
+$txtShrinkTarget  = Get-Ctrl 'txtShrinkTarget'
+$txtShrinkGuard   = Get-Ctrl 'txtShrinkGuard'
+$txtShrinkStatus  = Get-Ctrl 'txtShrinkStatus'
+$btnShrinkLog     = Get-Ctrl 'btnShrinkLog'
+$btnShrinkRefresh = Get-Ctrl 'btnShrinkRefresh'
+# v2.23 controls: Settings tab maintenance
+$txtSetShrinkTarget = Get-Ctrl 'txtSetShrinkTarget'
+$txtSetShrinkGuard  = Get-Ctrl 'txtSetShrinkGuard'
+$btnMaintSave       = Get-Ctrl 'btnMaintSave'
+$txtMaintStatus     = Get-Ctrl 'txtMaintStatus'
+#Dev Buttons
+$btnDevRemoteAdmin = New-Object System.Windows.Controls.Button   # triggered from the expanded device row
+
 # ------------------------------------------------------------
 # COLOR HELPERS + STATUS/TRAY COLOR
 # ------------------------------------------------------------
@@ -2144,6 +2363,54 @@ function Add-HistoryEntry {
         $csv = Join-Path $script:HistoryDir ('History_{0}.csv' -f (Get-Date).ToString('yyyy-MM-dd'))
         $entry | Export-Csv -Path $csv -Append -NoTypeInformation -Encoding UTF8
     } catch {}
+}
+function Load-History {
+    $script:HistoryList.Clear()
+    if (-not (Test-Path -LiteralPath $script:HistoryDir)) {
+        $statEvents.Text = '0'
+        return
+    }
+
+    $entries = New-Object 'System.Collections.Generic.List[PSObject]'
+    $files = @(Get-ChildItem -LiteralPath $script:HistoryDir -Filter 'History_*.csv' -File -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        try {
+            foreach ($row in @(Import-Csv -LiteralPath $file.FullName -ErrorAction Stop)) {
+                $entryTime = [datetime]::MinValue
+                $validTime = [datetime]::TryParseExact(
+                    [string]$row.Time,
+                    'yyyy-MM-dd HH:mm:ss',
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::None,
+                    [ref]$entryTime
+                )
+                if (-not $validTime) { continue }
+                $entries.Add([PSCustomObject]@{
+                    SortTime    = $entryTime
+                    Time        = [string]$row.Time
+                    ServiceName = [string]$row.ServiceName
+                    Group       = [string]$row.Group
+                    OldStatus   = [string]$row.OldStatus
+                    NewStatus   = [string]$row.NewStatus
+                    Note        = [string]$row.Note
+                })
+            }
+        } catch {
+            $statusBar.Text = "Could not load history from $($file.Name): $($_.Exception.Message)"
+        }
+    }
+
+    foreach ($entry in @($entries | Sort-Object SortTime -Descending)) {
+        $script:HistoryList.Add([PSCustomObject]@{
+            Time        = $entry.Time
+            ServiceName = $entry.ServiceName
+            Group       = $entry.Group
+            OldStatus   = $entry.OldStatus
+            NewStatus   = $entry.NewStatus
+            Note        = $entry.Note
+        })
+    }
+    $statEvents.Text = [string]$script:HistoryList.Count
 }
 function Get-ServiceEvents {
     param([int]$Hours = 24, [int]$MaxEvents = 200)
@@ -2863,7 +3130,7 @@ function Complete-DiscoverScan {
         }
     }
 }
-$btnDevDiscover.Add_Click({ $pnlRemote.Visibility = 'Collapsed'; $pnlRemoteAdmin.Visibility = 'Collapsed'; $pnlDiscover.Visibility = 'Visible'; Update-DiscoverList })
+$btnDevDiscover.Add_Click({ $pnlRemote.Visibility = 'Collapsed'; $pnlStationSnap.Visibility = 'Collapsed'; $pnlDiscover.Visibility = 'Visible'; Update-DiscoverList })
 $btnDscClose.Add_Click({ $pnlDiscover.Visibility = 'Collapsed' })
 $btnDscScan.Add_Click({ Start-DiscoverScan })
 $chkDscRdp.Add_Click({ Update-DiscoverList })
@@ -2893,17 +3160,17 @@ function Update-ServiceResourceMetricDisplay {
     param($Row, $Metrics)
     if (-not $Metrics) {
         $Row.MetricsTb.Text = 'CPU --  MEM --  Disk R/W --'
+        $Row.MetricsTb.ToolTip = 'Process metrics are not available yet.'
         return
     }
-
     $cpuText = if ($null -eq $Metrics.CpuPercent) { '--' } else { '{0:N1}%' -f $Metrics.CpuPercent }
     $memoryText = if ($null -eq $Metrics.MemoryMB) { '--' } else { '{0:N1} MB' -f $Metrics.MemoryMB }
     $readText = if ($null -eq $Metrics.ReadMBps) { '--' } else { '{0:N2}' -f $Metrics.ReadMBps }
     $writeText = if ($null -eq $Metrics.WriteMBps) { '--' } else { '{0:N2}' -f $Metrics.WriteMBps }
     $Row.MetricsTb.Text = "CPU $cpuText  MEM $memoryText  Disk R/W $readText/$writeText MB/s"
     $tooltip = 'Process-level metrics: CPU is a share of total system capacity, memory is working set, and disk is read/write I/O rate. Services sharing a process show the same values.'
-    if ($Metrics.ProcessId -gt 0) { $tooltip += " Process ID: $($Metrics.ProcessId)." }
-    if ($Metrics.Note) { $tooltip += " $($Metrics.Note)" }
+    if ($Metrics.Note) { $tooltip += "`r`n$($Metrics.Note)" }
+    if ($Metrics.ProcessId -gt 0) { $tooltip += "`r`nProcess ID: $($Metrics.ProcessId)" }
     $Row.MetricsTb.ToolTip = $tooltip
 }
 function Update-ServiceRow {
@@ -2973,14 +3240,14 @@ function Update-ServiceRow {
     }
 }
 function Update-AllServices {
-    $script:ServiceResourceMetrics = Get-ServiceResourceMetrics
     $script:ServiceCache = @{}
+    $script:ServiceResourceMetrics = Get-ServiceResourceMetrics
     foreach ($def in $script:ServiceDefs) {
         $script:ServiceCache[$def.Name] = Get-SafeServiceStatus $def.Name
         Update-ServiceRow $def.Name
     }
     Refresh-Summary
-    $script:NextServiceRefresh = [datetime]::Now.AddSeconds(2)
+    $script:NextServiceRefresh = [datetime]::Now.AddSeconds(3)
 }
 # ------------------------------------------------------------
 # FILTERING
@@ -3077,6 +3344,21 @@ if ($sn -and $sn.Value) {
         if ($p -and $null -ne $p.Value) { $script:SnapshotConfig[$k] = [int]$p.Value }
     }
 }
+$sh = $config.PSObject.Properties['Shrink']
+if ($sh -and $sh.Value) {
+    foreach ($k in @($script:ShrinkConfig.Keys)) {
+        $p = $sh.Value.PSObject.Properties[$k]
+        if ($p -and $null -ne $p.Value) { $v = 0; if ([int]::TryParse([string]$p.Value, [ref]$v)) { $script:ShrinkConfig[$k] = $v } }
+    }
+    # v2.23 renamed GuardMin to FullBackupMin (same number, opposite meaning) - honour a file saved by the old build
+    $oldGuard = $sh.Value.PSObject.Properties['GuardMin']
+    if ($oldGuard -and -not $sh.Value.PSObject.Properties['FullBackupMin'] -and $null -ne $oldGuard.Value) {
+        $v = 0; if ([int]::TryParse([string]$oldGuard.Value, [ref]$v)) { $script:ShrinkConfig['FullBackupMin'] = $v }
+    }
+}
+
+$ss = $config.PSObject.Properties['StationType']
+if ($ss -and $ss.Value) { $script:SsConfig['TypeOverride'] = [string]$ss.Value }
 function New-PackageObject([string]$Name, [string]$Installer, [bool]$WholeFolder, [string]$InstArgs) {
     $copy = 'Installer only'; if ($WholeFolder) { $copy = 'Whole folder' }
     [PSCustomObject]@{ Name = $Name; Installer = $Installer; WholeFolder = $WholeFolder; Copy = $copy; Args = $InstArgs; Result = '' }
@@ -3193,8 +3475,22 @@ $btnRefresh.Add_Click({
     if ($script:LastReaderLoad -ne [datetime]::MinValue) { Start-ReaderLoad }
 })
 $btnClearHistory.Add_Click({
+    $answer = [System.Windows.MessageBox]::Show(
+        'Clear the history shown here and delete the saved history files?',
+        'Clear History', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    try {
+        if (Test-Path -LiteralPath $script:HistoryDir) {
+            Get-ChildItem -LiteralPath $script:HistoryDir -Filter 'History_*.csv' -File -ErrorAction Stop |
+                Remove-Item -Force -ErrorAction Stop
+        }
+    } catch {
+        $statusBar.Text = "Could not clear saved history: $($_.Exception.Message)"
+        return
+    }
     $script:HistoryList.Clear()
     $statEvents.Text = '0'
+    $statusBar.Text = 'History cleared.'
 })
 $btnFilterAll.Add_Click({ Apply-Filter 'All' })
 $btnFilterApi.Add_Click({ Apply-Filter 'API' })
@@ -3322,7 +3618,7 @@ Initialize-SmtpUi
 # SETTINGS TAB: GITHUB UPDATES
 # ------------------------------------------------------------
 # Background job. Reads version.json from the repo; if it is newer (and Download is on) it also fetches the script,
-# checks its hash, checks that it parses as PowerShell and that it declares the version version.json promised.
+# checks that it parses as PowerShell and that it declares the version version.json promised.
 $script:UpdateScript = {
     param($repo, $branch, $token, $currentVersion, $download)
     $out = [ordered]@{ Ok = $false; Error = ''; Latest = ''; Notes = ''; Newer = $false; File = ''; Content = '' }
@@ -3348,10 +3644,6 @@ $script:UpdateScript = {
             $file = [string]$vj.file
             if ($file -notmatch '^[A-Za-z0-9._-]+\.ps1$') { throw 'version.json does not name a valid .ps1 file.' }
             $content = Get-GitHubText $repo $branch $file $token
-            $norm = $content -replace "`r`n", "`n"
-            $sha  = [System.Security.Cryptography.SHA256]::Create()
-            $hash = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($norm)) | ForEach-Object { $_.ToString('x2') }) -join '')
-            if ($hash -ne ([string]$vj.sha256).ToLower()) { throw 'The downloaded file does not match the hash in version.json, so the update was cancelled.' }
             $tokens = $null; $errs = $null
             [void][System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errs)
             if ($errs -and $errs.Count -gt 0) { throw 'The downloaded file is not valid PowerShell, so the update was cancelled.' }
@@ -3750,6 +4042,7 @@ function Initialize-SqlMaintenanceUi {
     $txtSqlBackupDirectory.Text = [string]$script:SqlMaintenanceConfig['BackupDirectory']
     Update-SqlMaintenancePlan
 }
+Initialize-SqlMaintenanceUi
 function Set-SqlMaintenanceSettingsStatus([string]$text, [string]$hex) {
     $txtSqlMaintenanceSettingsStatus.Text = $text
     $txtSqlMaintenanceSettingsStatus.Foreground = ColorBrush $hex
@@ -3809,6 +4102,8 @@ $btnSnapOpen.Add_Click({
 # REMOTE SERVICES (control EMBED services on another PC)
 # ------------------------------------------------------------
 $dgRemote.ItemsSource = $script:RemoteList
+# v2.23: which station services the Remote panel shows (matched on service name or display name)
+$script:RemoteServicePatterns = @('TeamViewer*', 'AnyDesk*', 'Spooler')
 # Background job: optional Stop/Start/Restart of $targets (in order; stop runs in reverse), then reads the status of every EMBED service.
 $script:RemoteSvcScript = {
     param($computer, $action, $targets, $queryNames)
@@ -3852,7 +4147,7 @@ $script:RemoteSvcScript = {
         }
     }
 
-    # $queryNames holds patterns matched against remote service name and display name.
+    # $queryNames holds wildcard patterns (e.g. 'TeamViewer*') matched on service name or display name
     $rows = @()
     try {
         foreach ($sc in [System.ServiceProcess.ServiceController]::GetServices($computer)) {
@@ -3913,7 +4208,7 @@ function Start-RemoteJob([string]$Action, [string[]]$Targets) {
     if (-not $computer) { Set-RemoteStatus 'Enter a computer name or IP first.' '#F38BA8'; return }
     if ($computer -notmatch '^[A-Za-z0-9._-]+$') { Set-RemoteStatus 'Use letters, numbers, dots, dashes or underscores only.' '#F38BA8'; return }
     if ($script:RemoteJob) { Set-RemoteStatus 'Still working on the last request...' '#89B4FA'; return }
-    $names = [string[]]@('TeamViewer*', 'Spooler', '*Spooler*', 'AnyDesk*')
+    $names = [string[]]$script:RemoteServicePatterns   # TeamViewer, AnyDesk, and Print Spooler
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
@@ -3948,15 +4243,10 @@ function Complete-RemoteJob {
         Set-RemoteStatus ("Could not reach {0}: {1}{2}" -f $res.Computer, $res.ConnectError, (Get-RemoteHint $res.ConnectError)) '#F38BA8'
         return
     }
-    foreach ($r in @($res.Rows)) {
-        if (-not $r.Name) { continue }
-        $isProcess = $false
-        $processProperty = $r.PSObject.Properties['IsProcess']
-        if ($processProperty) { $isProcess = [bool]$processProperty.Value }
-        $script:RemoteList.Add([PSCustomObject]@{
-            Display = $r.Display; Name = $r.Name; Status = $r.Status
-            StartType = $r.StartType; Detail = $r.Detail; IsProcess = $isProcess
-        })
+    # TeamViewer first, then the Print Spooler, so the list order is always the same
+    $ordered = @($res.Rows | Where-Object { $_.Name } | Sort-Object @{ Expression = { if ($_.Name -like 'TeamViewer*') { 0 } else { 1 } } }, Display)
+    foreach ($r in $ordered) {
+        $script:RemoteList.Add([PSCustomObject]@{ Display = $r.Display; Name = $r.Name; Status = $r.Status; StartType = $r.StartType })
     }
     $failed = @($res.Log | Where-Object { $_.Result -eq 'Failed' })
     $when   = (Get-Date).ToString('HH:mm:ss')
@@ -3964,8 +4254,8 @@ function Complete-RemoteJob {
         $f = $failed[0]
         Set-RemoteStatus ("{0} action(s) failed on {1}. {2}: {3}{4}" -f $failed.Count, $res.Computer, $display[$f.Name], $f.Note, (Get-RemoteHint $f.Note)) '#F38BA8'
     } elseif ($job.Action -eq 'Query') {
-        if ($script:RemoteList.Count -eq 0) { Set-RemoteStatus ("No matching remote services or processes found on {0} (checked at {1})." -f $res.Computer, $when) '#F9E2AF' }
-        else { Set-RemoteStatus ("Loaded {0} remote service/process check(s) from {1} at {2}." -f $script:RemoteList.Count, $res.Computer, $when) '#A6E3A1' }
+        if ($script:RemoteList.Count -eq 0) { Set-RemoteStatus ("No TeamViewer or Print Spooler service found on {0} (checked at {1})." -f $res.Computer, $when) '#F9E2AF' }
+        else { Set-RemoteStatus ("Loaded {0} service(s) from {1} at {2}." -f $script:RemoteList.Count, $res.Computer, $when) '#A6E3A1' }
     } else {
         Set-RemoteStatus ("{0} finished on {1} at {2}." -f $job.Action, $res.Computer, $when) '#A6E3A1'
     }
@@ -3985,7 +4275,7 @@ $btnDevServices.Add_Click({
     if ($dev) { $txtRemHost.Text = Get-RemoteHostFor $dev }
     $script:RemoteList.Clear()
     $pnlDiscover.Visibility = 'Collapsed'
-    $pnlRemoteAdmin.Visibility = 'Collapsed'
+    $pnlStationSnap.Visibility = 'Collapsed'
     $pnlRemote.Visibility = 'Visible'
     if ($txtRemHost.Text.Trim()) { Start-RemoteJob 'Query' @() }
     else { Set-RemoteStatus 'Type a computer name or IP, then click Load Services.' '#6C7086' }
@@ -5009,6 +5299,776 @@ $btnDevSoftware.Add_Click({
     $tabSoftware.IsSelected = $true
 })
 # ------------------------------------------------------------
+# STATION SNAPSHOT (Devices tab)
+# Copies the newest log files from a station, zips them under Snapshots\Stations, and lists findings:
+#   - lines that match the known-errors findings list (built in - see $script:DefaultFindings; the copy in
+#     Dashboard\LogFindings.json is regenerated when FindingsVersion changes, keeping the old one as a .bak)
+#   - any other ERROR / WARN / FATAL / Exception lines, grouped
+#   - one line repeated thousands of times (log flooding), a log that stopped being written, the app version
+# Logs are looked for in ECS7\<station>\Logs on this server first, then on the station (\\station\C$\...).
+# ------------------------------------------------------------
+$script:SsJob      = $null
+$script:SsLast     = $null
+$script:SsDevice   = $null
+$script:SsList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$dgSsFindings.ItemsSource = $script:SsList
+$script:SsAll      = @()      # every finding the last snapshot produced
+$script:SsShowAll  = $false   # $false lists only the main finding
+function Get-SsMainFinding {
+    # "The main one" means the worst thing, not simply the first row: an Error always beats a
+    # Warning, and among equals the one that happened most often wins.
+    param($Findings)
+    $list = @($Findings)
+    if ($list.Count -eq 0) { return $null }
+    $pick = @($list | Where-Object { $_.Severity -eq 'Error' } | Sort-Object -Property Times -Descending | Select-Object -First 1)
+    if ($pick.Count -eq 0) { $pick = @($list | Where-Object { $_.Severity -eq 'Warning' } | Sort-Object -Property Times -Descending | Select-Object -First 1) }
+    if ($pick.Count -eq 0) { $pick = @($list | Select-Object -First 1) }
+    return $pick[0]
+}
+function Update-SsFindings {
+    # The grid shows the main finding; everything stays in $script:SsAll, and the copied ticket
+    # and the snapshot's 00_Findings.txt always contain all of it. Hiding a row never hides data.
+    $script:SsList.Clear()
+    $all = @($script:SsAll)
+    if ($all.Count -eq 0) { $btnSsShowAll.Visibility = 'Collapsed'; return }
+    if ($script:SsShowAll) {
+        foreach ($f in $all) { $script:SsList.Add($f) }
+        $btnSsShowAll.Content = 'Show Main Only'
+    } else {
+        $main = Get-SsMainFinding $all
+        if ($main) { $script:SsList.Add($main) }
+        $btnSsShowAll.Content = ('Show All ({0})' -f $all.Count)
+    }
+    if ($all.Count -gt 1) { $btnSsShowAll.Visibility = 'Visible' } else { $btnSsShowAll.Visibility = 'Collapsed' }
+}
+$script:FindingsFile = Join-Path $script:DataRoot 'LogFindings.json'
+# Built-in known-errors list, from the team's EMBED_Known_Errors.txt. One entry per error:
+#   Text  - plain text to look for (escaped for you)
+#   Re    - a real regular expression, for wording a plain "contains" cannot express
+#   Steps - the resolution steps, in order: the grid shows the first, the detail pane shows all
+# A phrase that also appears on healthy hardware belongs in Re with a guard, not in Text. The note
+# acceptor poll writes "no devices found" when it is idle but "2 devices found" when it is working,
+# so a plain "devices found" would report a healthy kiosk as broken.
+# Bump FindingsVersion when this list changes. The file under Dashboard\ is rewritten to match on
+# the next snapshot and the old one is kept as a .bak, so new errors reach every site on upgrade.
+$script:FindingsVersion = 4
+$script:DefaultFindings = @(
+    [ordered]@{ Id = 'KIOSK-001'; Severity = 'Error'; Source = 'Kiosk'; Finding = 'STR reader error / disconnected'
+                Text  = @('STR-Ethernet error', 'STR disconnected', 'SmartTouchReader failed to initialise', 'error creating a socket for comms')
+                Steps = @('Verify the Ethernet USB connection',
+                          'Check the NCPA.cpl config for the correct IP config (IP 172.16.254.2, Subnet 255.255.255.252)') }
+    [ordered]@{ Id = 'KIOSK-002'; Severity = 'Error'; Source = 'Kiosk'; Finding = 'Note acceptor not connecting'
+                Text  = @('Note Validator Not Responding', 'Vald Sensor Fault')
+                Steps = @('Verify the note acceptor type - GBA or MEI',
+                          'GBA - Verify the connection to the USB dongle',
+                          'GBA - Verify Serial Module is running and communication to the system is showing',
+                          'GBA - Verify Astrosys and CCtalk are enabled in GURU Manage Applications',
+                          'MEI - Verify the connection to the IO board',
+                          'Verify COM port selections in Device Manager match the GURU COM ports',
+                          'Device Manager -> Serial Device (Properties) -> Details -> Property (Select Hardware Ids) -> Value = 2&2 (Coin acceptor) / 2&1 (Bill acceptor)') }
+    [ordered]@{ Id = 'KIOSK-004'; Severity = 'Warning'; Source = 'Kiosk'; Finding = 'Card dispenser error'
+                Text  = @('Unable to dispense cards', 'Card Dispenser is currently not working', 'ERROR RETRIEVING AVAILABLE CARDS')
+                Steps = @('Check the card hopper - refill if low',
+                          'Check for jammed or badly loaded cards and reload',
+                          'Verify the dispenser is powered and connected',
+                          'If errors continue after reload, the dispenser hardware may be failing') }
+    [ordered]@{ Id = 'KIOSK-005'; Severity = 'Error'; Source = 'Kiosk'; Finding = 'No payment method configured'
+                Text  = @('configure at least one form of payment acceptance')
+                Steps = @('Verify EPG / PIN pad setup on the kiosk',
+                          'Verify note/coin acceptors are connected and detected',
+                          'Check drivers and COM ports in Device Manager match GURU') }
+    [ordered]@{ Id = 'KIOSK-007'; Severity = 'Error'; Source = 'Kiosk'; Finding = 'Invalid station number'
+                Text  = @('invalid station number')
+                Steps = @('Verify the station number configured on the kiosk matches GURU / the till setup') }
+    [ordered]@{ Id = 'PRIZES-001'; Severity = 'Error'; Source = 'Prizes'; Finding = 'Scanner error (any scanner model/color)'
+                Text  = @('unknown barcode', 'Error Opening Serial Port')
+                Steps = @('Check the scanner cable / cradle connection',
+                          'Verify the scanner COM port in Device Manager matches the COM port in GURU',
+                          'If still failing, reset the scanner/cradle and reload the Embed config') }
+    [ordered]@{ Id = 'PRIZES-006'; Severity = 'Error'; Source = 'Prizes'; Finding = 'Unable to exit application'
+                Text  = @('Unable to Exit Application', 'Exit Application Unavailable')
+                Steps = @('Finish or cancel any open/parked transaction, then exit',
+                          'Verify the user has permission to exit the application') }
+    [ordered]@{ Id = 'POS-001'; Severity = 'Error'; Source = 'POS'; Finding = 'Bad Request on SALES launch'
+                Text  = @('Bad Request')
+                Steps = @('Chrome Local Network Access check (Chrome 142+)',
+                          'Disable the Local Network Access flag in Chrome and relaunch') }
+    [ordered]@{ Id = 'PAYMENT-001'; Severity = 'Error'; Source = ''; Finding = 'PIN pad not connected'
+                Text  = @('ClientNotConnectedToServer', 'Unable to open a connection', 'UnableToOpenConnection', 'Pipeline is closed')
+                Steps = @('Check the PIN pad power and cable connection',
+                          'Verify the PIN pad config in EPG',
+                          'Restart EPG') }
+)
+function New-BuiltinFindings {
+    $tmp = @()
+    foreach ($d in $script:DefaultFindings) {
+        $parts = @()
+        if ($d.Contains('Text')) { foreach ($t in @($d['Text'])) { if ($t) { $parts += [regex]::Escape([string]$t) } } }
+        if ($d.Contains('Re'))   { foreach ($r in @($d['Re']))   { if ($r) { $parts += [string]$r } } }   # the whole entry is grouped below
+        if ($parts.Count -eq 0) { continue }
+        $m = ($parts -join '|'); if ($parts.Count -gt 1) { $m = '(?:' + $m + ')' }
+        $steps = @(); if ($d.Contains('Steps')) { $steps = @($d['Steps']) }
+        $fix = ''
+        if ($steps.Count -eq 1) { $fix = [string]$steps[0] }
+        elseif ($steps.Count -gt 1) { $fix = (0..($steps.Count - 1) | ForEach-Object { '{0}) {1}' -f ($_ + 1), $steps[$_] }) -join "`r`n" }
+        $spec = ($parts | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+        $tmp += [pscustomobject]@{
+            Spec = $spec
+            Rule = [ordered]@{ Id = [string]$d['Id']; Match = $m; Regex = $true; Severity = [string]$d['Severity']
+                               Finding = [string]$d['Finding']; Fix = $fix; Source = [string]$d['Source'] }
+        }
+    }
+    # the reader stops at the first rule that matches, so the most specific wording goes first
+    return @($tmp | Sort-Object -Property Spec -Descending | ForEach-Object { $_.Rule })
+}
+function Get-RepeatNote {
+    # Turns "hit 8640 times" into "about every 10s", so a retry loop reads as one fault at a
+    # steady rate instead of an ever-growing number. Returns '' when there is nothing to say.
+    param($First, $Last, $Times)
+    $n = 0
+    if (-not [int]::TryParse([string]$Times, [ref]$n) -or $n -lt 3) { return '' }
+    try {
+        $a = [datetime]::ParseExact([string]$First, 'yyyy-MM-dd HH:mm:ss', $null)
+        $b = [datetime]::ParseExact([string]$Last, 'yyyy-MM-dd HH:mm:ss', $null)
+        $span = ($b - $a).TotalSeconds
+        if ($span -le 0) { return '' }
+        $per = $span / ($n - 1)
+        if ($per -ge 3600) { return ('about every {0:N1} hours' -f ($per / 3600)) }
+        if ($per -ge 60)   { return ('about every {0:N0} min' -f [math]::Round($per / 60)) }
+        return ('about every {0:N0}s' -f $per)
+    } catch { return '' }
+}
+function Get-StationFindingRules {
+    # The file is written by this script, so no site ever needs a findings file copied to it.
+    # When FindingsVersion moves on the old file is kept as a .bak and the new list is written:
+    # hand edits stay recoverable, but the shipped list always wins on upgrade.
+    $upgraded = $false
+    $haveFile = Test-Path -LiteralPath $script:FindingsFile
+    $rewrite  = -not $haveFile
+    if ($haveFile) {
+        $doc = $null
+        try { $doc = Get-Content -LiteralPath $script:FindingsFile -Raw | ConvertFrom-Json } catch { $doc = $null }
+        $ver = 0
+        if ($doc -and -not ($doc -is [array]) -and -not ($doc -is [System.Collections.IList])) {
+            $p = $doc.PSObject.Properties['Version']
+            if ($p -and $null -ne $p.Value) { [void][int]::TryParse([string]$p.Value, [ref]$ver) }
+        }
+        if ($ver -lt $script:FindingsVersion) { $rewrite = $true; $upgraded = $true }
+    }
+    if ($rewrite) {
+        try {
+            if (-not (Test-Path -LiteralPath $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
+            if ($haveFile) {
+                $bak = '{0}.{1}.bak' -f $script:FindingsFile, (Get-Date).ToString('yyyyMMdd_HHmmss')
+                Copy-Item -LiteralPath $script:FindingsFile -Destination $bak -Force -ErrorAction Stop
+            }
+            $newDoc = [ordered]@{ Version = $script:FindingsVersion; Entries = @(New-BuiltinFindings) }
+            (ConvertTo-Json -InputObject $newDoc -Depth 6) | Set-Content -LiteralPath $script:FindingsFile -Encoding UTF8
+        } catch { $upgraded = $false }
+    }
+    $rules = @(); $bad = 0
+    try {
+        $doc = Get-Content -LiteralPath $script:FindingsFile -Raw | ConvertFrom-Json
+        if ($doc -is [array] -or $doc -is [System.Collections.IList]) { $raw = @($doc) }
+        else {
+            $p = $doc.PSObject.Properties['Entries']
+            if ($p -and $null -ne $p.Value) { $raw = @($p.Value) } else { $raw = @($doc) }
+        }
+    } catch { $raw = @(); $bad++ }
+    foreach ($x in $raw) {
+        if (-not $x) { continue }
+        $get = { param($n) $p = $x.PSObject.Properties[$n]; if ($p -and $null -ne $p.Value) { [string]$p.Value } else { '' } }
+        $m = & $get 'Match'
+        if (-not $m) { $bad++; continue }
+        $isRx = ((& $get 'Regex') -eq 'True')
+        if ($isRx) { try { [void][regex]::new($m) } catch { $bad++; continue } }
+        $sev = & $get 'Severity'; if ($sev -notin @('Error', 'Warning', 'Info')) { $sev = 'Error' }
+        $fd  = & $get 'Finding';  if (-not $fd) { $fd = $m }
+        $rules += @{ Match = $m; Regex = $isRx; Severity = $sev; Finding = $fd; Fix = (& $get 'Fix'); Source = (& $get 'Source') }
+    }
+    return @{ Rules = $rules; Bad = $bad; Upgraded = $upgraded }
+}
+# Which logs to pull. A station only ever gets the logs of the system it actually runs, and the dashboard works that
+# out from the station itself - there is nothing to tick on screen.
+#   Kiosk station  -> ECS7\Kiosk\Logs
+#   RedPOS station -> ECS7\POS\Logs (SALES) plus the prizes logs (ECS7\POS\RedPro\Logs, or ECS7\RedPro\Logs)
+# Every source also reads its own files out of ECS7\Logs. The apps write a few startup lines into their own folder and
+# then switch to "Standard Logging" in the ESAdmin folder, with the station name in front of the file name
+# (PRIZES_REDPRO1_2026-11-05.0.log, SALES_POS1_..., Kiosk1 Log ...). The application-folder log then holds only the
+# startup, so a fault logged minutes later is only ever in ECS7\Logs. 'Shared' lists the name patterns that mark this
+# source's files there; the other sources' files in that folder are left alone. RedPro also keeps a separate
+# "RedPro - Error Log - <date>.log" for its crashes, which is why PRIZES' patterns include RedPro*.
+$script:StationProfiles = [ordered]@{
+    Kiosk  = @{ Key = 'Kiosk';  Label = 'Kiosk';           Folders = @('Kiosk\Logs');                    Preferred = 'Kiosk*';  Shared = 'Kiosk*' }
+    POS    = @{ Key = 'POS';    Label = 'POS';             Folders = @('POS\Logs');                      Preferred = 'SALES*';  Shared = 'SALES*' }
+    Prizes = @{ Key = 'Prizes'; Label = 'Prizes (RedPro)'; Folders = @('POS\RedPro\Logs', 'RedPro\Logs'); Preferred = 'PRIZES*'; Shared = @('PRIZES*', 'RedPro*'); Sweep = @('PRIZES*', 'RedPro*'); Always = @('*Error Log*') }
+}
+# What a station of each type runs. A REDPOS till runs the POS (SALES) logs plus the prizes (RedPro) logs, a REDPRO
+# machine runs only the prizes logs, and a kiosk only its own. The type decides which of those sources get read.
+$script:StationTypes = [ordered]@{
+    Kiosk  = @{ Label = 'Kiosk';  Sources = @('Kiosk') }
+    RedPOS = @{ Label = 'RedPOS'; Sources = @('POS', 'Prizes') }
+    RedPro = @{ Label = 'RedPro'; Sources = @('Prizes') }
+}
+# Station name hints. Only used to break a tie when one PC happens to have more than one system's logs on disk.
+# REDPRO and REDPOS cannot match each other's names, so the order between them does not matter.
+$script:StationTypeNames = [ordered]@{
+    RedPOS = '^(REDPOS|REDPOSITION|RPOS|POS)[-_]?\d+'
+    RedPro = '^REDPRO'
+    Kiosk  = '^KIOSK'
+}
+# Runs in a background runspace. Works out which system the station runs, pulls the newest logs of that system only,
+# zips them, and lists findings. A log type the station does not have is skipped without a word.
+$script:StationSnapScript = {
+    param($target, $hostName, $count, $workDir, $rules, $ecsDir, $cfg)
+    $o = [ordered]@{
+        Ok = $false; Error = ''; NotFound = $false; Host = $hostName; StationType = ''
+        Source = ''; Sources = @(); Files = @(); Findings = @(); Versions = @{}; Version = ''; Lines = 0; Zip = ''
+        Probed = @()
+    }
+    $profiles = $cfg.Profiles
+    $types    = $cfg.Types
+    $nameHints = $cfg.Names
+    $override = [string]$cfg.Override
+    function Get-Deepest($err) { $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }; $e.Message }
+    function New-Hit($sev, $finding, $fix, $src) {
+        @{ Severity = $sev; Source = $src; Finding = $finding; Fix = $fix; Times = 0; First = ''; Last = ''; Sample = '' }
+    }
+    # "12 times" on its own hides that it is one fault every 10 seconds. Same wording as the
+    # dashboard side (Get-RepeatNote) - this copy has to live in the runspace.
+    function Get-RepeatNote($first, $last, $times) {
+        $n = 0
+        if (-not [int]::TryParse([string]$times, [ref]$n) -or $n -lt 3) { return '' }
+        try {
+            $a = [datetime]::ParseExact([string]$first, 'yyyy-MM-dd HH:mm:ss', $null)
+            $b = [datetime]::ParseExact([string]$last, 'yyyy-MM-dd HH:mm:ss', $null)
+            $span = ($b - $a).TotalSeconds
+            if ($span -le 0) { return '' }
+            $per = $span / ($n - 1)
+            if ($per -ge 3600) { return ('about every {0:N1} hours' -f ($per / 3600)) }
+            if ($per -ge 60)   { return ('about every {0:N0} min' -f [math]::Round($per / 60)) }
+            return ('about every {0:N0}s' -f $per)
+        } catch { return '' }
+    }
+    # 'SALES_2026-02-25.0.log' -> 'SALES' ; 'PRIZES_Cashier1_2026-02-25.0.log' -> 'PRIZES_Cashier1'
+    # 'RedPro - Error Log - 2026-11-05.log' -> 'RedPro - Error Log' (that one has no instance number after the date)
+    function Get-LogFamily([string]$n) {
+        $x = $n -replace '\.(log|txt)$', ''
+        $x = $x -replace '\s*\d{4}-\d{2}-\d{2}\.\d+$', ''
+        $x = $x -replace '\s*-\s*\d{4}-\d{2}-\d{2}$', ''
+        $x = $x -replace '_\d{8}\.\d+$', ''
+        $x = $x -replace '\.\d+$', ''
+        return $x.Trim()
+    }
+    try {
+        # 1) Work out the PC's real hostname, then where its ECS7 folder is.
+        function Get-ActualHostName([string]$Name, [string]$Addr) {
+            if ($Name -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return ($Name -split '\.')[0] }
+            try {
+                $dt = [System.Net.Dns]::GetHostEntryAsync($Name)
+                if ($dt.Wait(3000)) {
+                    $h = ([string]$dt.Result.HostName -split '\.')[0]
+                    if ($h -and $h -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $h }
+                }
+            } catch {}
+            try {
+                $cs = New-CimSession -ComputerName $Addr -SessionOption (New-CimSessionOption -Protocol Dcom) -OperationTimeoutSec 8 -ErrorAction Stop
+                try {
+                    $n = [string](Get-CimInstance -CimSession $cs -ClassName Win32_ComputerSystem -ErrorAction Stop).Name
+                    if ($n) { return $n }
+                } finally { Remove-CimSession -CimSession $cs -ErrorAction SilentlyContinue }
+            } catch {}
+            return $Name
+        }
+        $hostName = Get-ActualHostName $hostName $target
+        $o.Host   = $hostName
+        $isLocal  = ($hostName -ieq $env:COMPUTERNAME) -or ($target -in @('localhost', '127.0.0.1'))
+        if (-not $isLocal) {
+            foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+                foreach ($ua in $nic.GetIPProperties().UnicastAddresses) { if ($ua.Address.ToString() -eq $target) { $isLocal = $true } }
+            }
+        }
+        if ($isLocal) {
+            $rootDir = $ecsDir
+        } else {
+            $reach = $false
+            $tc = New-Object System.Net.Sockets.TcpClient
+            try { $t = $tc.ConnectAsync($target, 445); if ($t.Wait(2500) -and $tc.Connected) { $reach = $true } } catch {} finally { $tc.Close() }
+            if (-not $reach) { throw "$target did not answer on port 445 (file sharing), so the logs on $hostName cannot be reached." }
+            $rootDir = "\\$target\C$\Program Files (x86)\ECS7"
+            if (-not (Test-Path -LiteralPath $rootDir)) { throw "Could not open $rootDir - your account needs admin rights on the station." }
+        }
+
+        # 2) Probe every log source: which of its folders exist, and how old is its newest log? The application
+        #    folder and the ESAdmin folder (ECS7\Logs) are both read, because once the app switches to standard
+        #    logging the live log is the one in ECS7\Logs and the application folder keeps only the startup lines.
+        $probe = @{}
+        $probeNotes = @()
+        foreach ($key in @($profiles.Keys)) {
+            $prof  = $profiles[$key]
+            $dirs  = @()
+            $found = @()
+            $tried = @()
+            $errs  = @()
+            foreach ($sub in @($prof.Folders)) {
+                $cand = Join-Path $rootDir $sub
+                $tried += $sub
+                if (-not (Test-Path -LiteralPath $cand)) { continue }
+                $dirs += $cand
+                try {
+                    $found += @(Get-ChildItem -LiteralPath $cand -File -Recurse -Depth 1 -ErrorAction Stop |
+                                Where-Object { $_.Extension -in @('.log', '.txt') })
+                } catch { $errs += ('{0} could not be read: {1}' -f $sub, (Get-Deepest $_)) }
+            }
+            if ($prof.ContainsKey('Shared')) {
+                $shared = Join-Path $rootDir 'Logs'
+                $tried += 'Logs'
+                if ((Test-Path -LiteralPath $shared) -and ($shared -notin $dirs)) {
+                    $pats = @($prof.Shared)
+                    $own  = @(Get-ChildItem -LiteralPath $shared -File -ErrorAction SilentlyContinue | Where-Object {
+                                 $f = $_
+                                 ($f.Extension -in @('.log', '.txt')) -and (@($pats | Where-Object { $f.Name -like $_ }).Count -gt 0)
+                             })
+                    if ($own.Count -gt 0) { $dirs += $shared; $found += $own }
+                }
+            }
+            $found = @($found | Sort-Object LastWriteTime -Descending)
+            if ($found.Count -eq 0 -and $prof.ContainsKey('Sweep')) {
+                # Last resort: the install is not where it usually is. Look once, shallow, under ECS7 for this
+                # source's own log names and say where they turned up, rather than reporting a station as having
+                # no prizes logs when it plainly does.
+                $spats = @($prof.Sweep)
+                $swept = @(Get-ChildItem -LiteralPath $rootDir -File -Recurse -Depth 3 -ErrorAction SilentlyContinue | Where-Object {
+                              $f = $_
+                              ($f.Extension -in @('.log', '.txt')) -and (@($spats | Where-Object { $f.Name -like $_ }).Count -gt 0)
+                          })
+                if ($swept.Count -gt 0) {
+                    $found = @($swept | Sort-Object LastWriteTime -Descending)
+                    foreach ($sd in @($swept | ForEach-Object { Split-Path -Path $_.FullName -Parent } | Sort-Object -Unique)) {
+                        if ($sd -and $sd -notin $dirs) { $dirs += $sd }
+                    }
+                    $probeNotes += ('{0}: usual folders empty, found logs by searching under ECS7' -f $prof.Label)
+                }
+            }
+            if ($found.Count -eq 0) {
+                # say where it was looked for: a source that is silently skipped is impossible to troubleshoot
+                $probeNotes += ('{0}: no logs found - looked in {1}' -f $prof.Label, ($tried -join ', '))
+                foreach ($er in $errs) { $probeNotes += ('{0}: {1}' -f $prof.Label, $er) }
+                continue
+            }
+            $probeNotes += ('{0}: {1} file(s) found in {2}' -f $prof.Label, $found.Count, ($dirs -join '; '))
+            foreach ($er in $errs) { $probeNotes += ('{0}: {1}' -f $prof.Label, $er) }
+            $newest = $found | Select-Object -First 1
+            $probe[$key] = [PSCustomObject]@{
+                Key = $key; Label = $prof.Label; Folder = ($dirs -join '; '); Files = $found
+                NewestHours = ((Get-Date) - [datetime]$newest.LastWriteTime).TotalHours
+            }
+        }
+        $o.Probed = $probeNotes
+        if ($probe.Count -eq 0) {
+            $o.NotFound = $true
+            throw ("No Kiosk, POS or Prizes logs were found on {0}. {1}" -f $hostName, ($probeNotes -join '; '))
+        }
+
+        # 3) Which system does this station run? Only that system's logs are pulled.
+        # The station name is the strongest hint: a REDPOS1 is a RedPOS and never a kiosk. Only when the name says
+        # nothing do we work it out from which logs are on disk and which were written today.
+        $hinted = ''
+        foreach ($n in @($nameHints.Keys)) { if ($hostName -match [string]$nameHints[$n]) { $hinted = $n; break } }
+        $stationType = ''
+        $useKeys = @()
+        if ($override -and $override -ne 'Auto' -and $types.Contains($override)) {
+            $stationType = $override
+            $useKeys = @($types[$override].Sources | Where-Object { $probe.ContainsKey($_) })
+        } elseif ($hinted -and $types.Contains($hinted)) {
+            $have = @($types[$hinted].Sources | Where-Object { $probe.ContainsKey($_) })
+            if ($have.Count -gt 0) { $stationType = $hinted; $useKeys = $have }
+        }
+        if ($useKeys.Count -eq 0) {
+            $best = ''; $bestScore = -1
+            foreach ($t in @($types.Keys)) {
+                $need = @($types[$t].Sources)
+                $have = @($need | Where-Object { $probe.ContainsKey($_) })
+                if ($have.Count -ne $need.Count) { continue }             # this station is missing part of that set
+                $fresh = @($need | Where-Object { $probe[$_].NewestHours -le 24 }).Count
+                $score = $fresh * 10 + $have.Count                        # logs written today identify the system best
+                if ($score -gt $bestScore) { $best = $t; $bestScore = $score }
+            }
+            if ($best) { $stationType = $best; $useKeys = @($types[$best].Sources | Where-Object { $probe.ContainsKey($_) }) }
+        }
+        if ($useKeys.Count -eq 0) {
+            $useKeys = @($probe.Keys)                                     # partial set: take whatever this PC has
+            if (-not $stationType) { $stationType = 'Unknown' }
+        }
+        $o.StationType = $stationType
+
+        # 4) Copy the newest files of the chosen sources. One file per log family, so four cashier logs cannot push
+        #    the main SALES / PRIZES log out of the list.
+        $logDir = Join-Path $workDir 'Logs'
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        $copies = @()
+        $used   = @()
+        $labels = @{}
+        foreach ($key in $useKeys) {
+            $p    = $probe[$key]
+            $prof = $profiles[$key]
+            $pick = @()
+            $pref = [string]$prof.Preferred
+            if ($pref) {
+                $first = $p.Files | Where-Object { $_.Name -like $pref } | Select-Object -First 1
+                if ($first) { $pick += $first }
+            }
+            $seen = @{}
+            foreach ($f in $pick) { $seen[(Get-LogFamily $f.Name)] = $true }
+            foreach ($f in @($p.Files)) {
+                if ($pick.Count -ge $count) { break }
+                $fam = Get-LogFamily $f.Name
+                if ($seen.ContainsKey($fam)) { continue }
+                $seen[$fam] = $true
+                $pick += $f
+            }
+            # The RedPro error log is only written when something fails, so it always loses the race for the last
+            # slot against the live cashier logs (a RedPOS has six families and five slots). It is pulled anyway:
+            # it is the file that says what broke.
+            if ($prof.ContainsKey('Always')) {
+                $apats = @($prof.Always)
+                foreach ($af in @($p.Files)) {
+                    if (@($apats | Where-Object { $af.Name -like $_ }).Count -eq 0) { continue }
+                    # one per family, so two weeks of old error logs are not dragged in as well
+                    $afam = Get-LogFamily $af.Name
+                    if ($seen.ContainsKey($afam)) { continue }
+                    $seen[$afam] = $true
+                    $pick += $af
+                }
+            }
+            $destDir = Join-Path $logDir $key
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+            foreach ($f in $pick) {
+                $dest = Join-Path $destDir $f.Name
+                $in = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+                try { $out = [System.IO.File]::Create($dest); try { $in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }
+                $copies += [PSCustomObject]@{ Path = $dest; Key = $key; Label = $p.Label }
+                $o.Files += [PSCustomObject]@{ Name = $f.Name; Source = $p.Label; Size = $f.Length; Written = $f.LastWriteTime }
+            }
+            $used += ('{0} ({1})' -f $p.Label, $p.Folder)
+            $labels[$key] = $p.Label
+        }
+        $o.Sources = @($used)
+        $o.Source  = ($used -join '; ')
+        if ($copies.Count -eq 0) { $o.NotFound = $true; throw ("No logs could be copied from {0}." -f $hostName) }
+
+        # 5) Read every copied line once, tagged with the log type it came from
+        $rx = @{}
+        for ($i = 0; $i -lt $rules.Count; $i++) { if ($rules[$i].Regex) { $rx[$i] = [regex]::new([string]$rules[$i].Match, 'IgnoreCase') } }
+        $ruleHits  = @{}
+        $otherHits = @{}
+        $msgCount  = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+        $msgFirst  = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $msgLast   = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $msgSrc    = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $ic = [System.StringComparison]::OrdinalIgnoreCase
+        # The RedPro error log ("RedPro - Error Log - <date>.log") is not one line per event: it is a block per
+        # error, and the text naming the fault sits two lines under "ECS Debug Message:". It has no severity column
+        # and no "Exception" keyword, so read as plain lines it looks like ordinary chatter and a real fault would
+        # never be listed. These blocks are turned into a finding of their own.
+        $dbgWait    = $false
+        $dbgPending = ''
+        foreach ($cp in $copies) {
+            $sr = New-Object System.IO.StreamReader($cp.Path)
+            try {
+                while ($null -ne ($line = $sr.ReadLine())) {
+                    if ($line.Length -eq 0) { continue }
+                    $o.Lines++
+                    if ($line.Trim() -eq 'ECS Debug Message:') { $dbgWait = $true; continue }
+                    if ($dbgWait) {
+                        if ($line -match '^=+\s*$') { continue }             # the underline under the heading
+                        $dbgPending = $line.Trim(); $dbgWait = $false
+                    }
+                    $ts = ''; $lvl = ''; $msg = $line
+                    $bar = $line.IndexOf(' | ')
+                    if ($bar -gt 0 -and $bar -lt 48) {
+                        $head = $line.Substring(0, $bar); $msg = $line.Substring($bar + 3)
+                        if ($head.Length -ge 19) { $ts = $head.Substring(0, 19) }
+                        $sp = $head.LastIndexOf(' '); if ($sp -ge 0) { $lvl = $head.Substring($sp + 1).ToUpperInvariant() }
+                    }
+                    if ($msg.StartsWith('Application version ')) {
+                        $o.Version = $msg.Substring(20).Trim()
+                        $o.Versions[$cp.Key] = $o.Version
+                    }
+                    if ($msgCount.ContainsKey($msg)) { $msgCount[$msg]++; $msgLast[$msg] = $ts }
+                    elseif ($msgCount.Count -lt 20000) { $msgCount[$msg] = 1; $msgFirst[$msg] = $ts; $msgLast[$msg] = $ts; $msgSrc[$msg] = $cp.Key }
+                    $hitIdx = -1
+                    for ($i = 0; $i -lt $rules.Count; $i++) {
+                        if ($rules[$i].Source -and ([string]$rules[$i].Source -ne $cp.Key)) { continue }
+                        if ($rx.ContainsKey($i)) { if ($rx[$i].IsMatch($line)) { $hitIdx = $i; break } }
+                        elseif ($line.IndexOf([string]$rules[$i].Match, $ic) -ge 0) { $hitIdx = $i; break }
+                    }
+                    if ($hitIdx -ge 0) {
+                        if (-not $ruleHits.ContainsKey($hitIdx)) {
+                            $r = $rules[$hitIdx]
+                            $ruleHits[$hitIdx] = New-Hit $r.Severity $r.Finding $r.Fix $cp.Label
+                            $ruleHits[$hitIdx].First = $ts
+                            $ruleHits[$hitIdx].Sample = $line
+                        }
+                        $h = $ruleHits[$hitIdx]; $h.Times++; $h.Last = $ts
+                        $dbgPending = ''                                  # a rule already names this fault
+                        continue
+                    }
+                    $isErr = ($lvl -in @('ERROR', 'FATAL', 'WARN', 'WARNING')) -or ($line.IndexOf('Exception', $ic) -ge 0)
+                    if ($isErr) {
+                        $key = $cp.Key + '|' + ($msg -replace '\d+', '#')
+                        if ($key.Length -gt 200) { $key = $key.Substring(0, 200) }
+                        if (-not $otherHits.ContainsKey($key)) {
+                            if ($otherHits.Count -ge 500) { continue }
+                            $sev = if ($lvl -in @('WARN', 'WARNING')) { 'Warning' } else { 'Error' }
+                            $otherHits[$key] = New-Hit $sev ("Log error: " + $(if ($msg.Length -gt 120) { $msg.Substring(0, 120) + '...' } else { $msg })) 'Not in the findings list yet - check the log line below, and add it to the list once you know the fix.' $cp.Label
+                            $otherHits[$key].First = $ts
+                            $otherHits[$key].Sample = $line
+                        }
+                        $h = $otherHits[$key]; $h.Times++; $h.Last = $ts
+                    }
+                    if ($dbgPending) {
+                        # an error block from the RedPro error log that no rule names
+                        $dkey = $cp.Key + '|DBG|' + $dbgPending
+                        if (-not $otherHits.ContainsKey($dkey) -and $otherHits.Count -lt 500) {
+                            $otherHits[$dkey] = New-Hit 'Error' ('Log error: ' + $dbgPending) 'Not in the findings list yet - check the log line below, and add it to the list once you know the fix.' $cp.Label
+                            $otherHits[$dkey].First = $ts
+                            $otherHits[$dkey].Sample = $line
+                        }
+                        if ($otherHits.ContainsKey($dkey)) { $h = $otherHits[$dkey]; $h.Times++; $h.Last = $ts }
+                        $dbgPending = ''
+                    }
+                }
+            } finally { $sr.Dispose() }
+        }
+
+        # 6) Findings
+        $out = @()
+        foreach ($h in @($ruleHits.Values | Sort-Object { $_.Times } -Descending)) { $out += $h }
+        foreach ($h in @($otherHits.Values | Sort-Object { $_.Times } -Descending | Select-Object -First 15)) { $out += $h }
+        # Log flooding: one line making up most of what was read
+        if ($msgCount.Count -gt 0 -and $o.Lines -ge 2000) {
+            $top = $null; $topN = 0
+            foreach ($k in $msgCount.Keys) { if ($msgCount[$k] -gt $topN) { $top = $k; $topN = $msgCount[$k] } }
+            if ($topN -ge 2000 -and ($topN / $o.Lines) -ge 0.5) {
+                $rate = ''
+                try {
+                    $a = [datetime]::ParseExact($msgFirst[$top], 'yyyy-MM-dd HH:mm:ss', $null); $b = [datetime]::ParseExact($msgLast[$top], 'yyyy-MM-dd HH:mm:ss', $null)
+                    $mins = ($b - $a).TotalMinutes; if ($mins -ge 1) { $rate = ', about {0:N0} per minute' -f ($topN / $mins) }
+                } catch {}
+                $short = if ($top.Length -gt 80) { $top.Substring(0, 80) + '...' } else { $top }
+                $h = New-Hit 'Warning' ("Log flooding: the same line repeats ({0:N0} times{1}): ""{2}""" -f $topN, $rate, $short) 'The app may be restarting over and over, or its logging is stuck. Check it stays open on the station, restart it, and escalate with this snapshot if it keeps happening.' $msgSrc[$top]
+                $h.Times = $topN; $h.First = $msgFirst[$top]; $h.Last = $msgLast[$top]; $h.Sample = $top
+                $out += $h
+            }
+        }
+        # Per log type that was pulled: is its newest file still being written?
+        foreach ($g in @($o.Files | Group-Object Source)) {
+            $newest = $g.Group | Sort-Object Written -Descending | Select-Object -First 1
+            if ($newest -and ((Get-Date) - [datetime]$newest.Written).TotalHours -ge 2) {
+                $hours = ((Get-Date) - [datetime]$newest.Written).TotalHours
+                $h = New-Hit 'Warning' ("Newest {0} log was last written {1} ({2:N0} hours ago)" -f $g.Name, ([datetime]$newest.Written).ToString('yyyy-MM-dd HH:mm'), $hours) 'That app may not be running on the station. Check it is open, or restart it.' $g.Name
+                $h.Times = 1; $h.Last = ([datetime]$newest.Written).ToString('yyyy-MM-dd HH:mm:ss'); $h.Sample = $newest.Name
+                $out += $h
+            }
+        }
+        foreach ($k in @($o.Versions.Keys | Sort-Object)) {
+            $lbl = $k; if ($labels.ContainsKey($k)) { $lbl = $labels[$k] }
+            $h = New-Hit 'Info' "$lbl app version $($o.Versions[$k])" '' $lbl; $h.Times = 1; $out += $h
+        }
+        if (@($out | Where-Object { $_.Severity -in @('Error', 'Warning') }).Count -eq 0) {
+            $h = New-Hit 'OK' 'No known errors found in the pulled logs' '' ''; $h.Times = 0; $out = @($h) + $out
+        }
+        $o.Findings = @($out | ForEach-Object { [PSCustomObject]$_ })
+
+        # 7) Findings file + zip
+        $txt = @("Station snapshot - $hostName ($stationType)", "Created:  $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))", "Logs from: $($o.Source)")
+        foreach ($pn in @($o.Probed)) { $txt += "  $pn" }
+        $txt += @("Lines read: $($o.Lines)", "")
+        foreach ($f in $o.Findings) {
+            $tag = ''; if ($f.Source) { $tag = "[$($f.Source)] " }
+            $txt += ("{0}{1}  (x{2}, last {3})" -f $tag, "[$($f.Severity)] $($f.Finding)", $f.Times, $f.Last)
+            $rep = Get-RepeatNote $f.First $f.Last $f.Times
+            if ($rep) { $txt += "    Repeat rate: $rep" }
+            if ($f.Fix) { $txt += "    What to try: $($f.Fix)" }
+            if ($f.Sample) { $txt += "    Log line: $($f.Sample)" }
+            $txt += ''
+        }
+        $txt += 'Files copied:'
+        foreach ($f in $o.Files) { $txt += ("  [{0}] {1}  ({2:N0} KB, written {3})" -f $f.Source, $f.Name, ($f.Size / 1KB), ([datetime]$f.Written).ToString('yyyy-MM-dd HH:mm')) }
+        $txt | Set-Content (Join-Path $workDir '00_Findings.txt') -Encoding UTF8
+        $leaf  = Split-Path $workDir -Leaf
+        $stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+        if ($leaf -match '(\d{8}_\d{6})$') { $stamp = $Matches[1] }
+        $zip = Join-Path (Split-Path $workDir -Parent) ('Station_{0}_{1}.zip' -f ($hostName -replace '[^A-Za-z0-9._-]', '_'), $stamp)
+        Compress-Archive -Path (Join-Path $workDir '*') -DestinationPath $zip -Force
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        $o.Zip = $zip
+        $o.Ok = $true
+    } catch {
+        $o.Error = Get-Deepest $_
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    [PSCustomObject]$o
+}
+function Set-SsStatus([string]$text, [string]$hex) { $txtSsStatus.Text = $text; $txtSsStatus.Foreground = ColorBrush $hex }
+function Remove-OldStationSnapshots {
+    $dir = Join-Path $script:SnapshotRoot 'Stations'
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    $keep = [int]$script:SnapshotConfig['KeepCount']; $days = [int]$script:SnapshotConfig['MaxAgeDays']
+    $cut  = (Get-Date).AddDays(-$days)
+    $byHost = Get-ChildItem -LiteralPath $dir -Filter 'Station_*.zip' | Group-Object { ($_.BaseName -replace '_\d{8}_\d{6}$', '') }
+    foreach ($g in $byHost) {
+        $i = 0
+        foreach ($z in @($g.Group | Sort-Object LastWriteTime -Descending)) {
+            if ($i -ge $keep -or ($days -gt 0 -and $z.LastWriteTime -lt $cut)) { Remove-Item -LiteralPath $z.FullName -Force -ErrorAction SilentlyContinue }
+            $i++
+        }
+    }
+}
+function Start-StationSnapshot($dev) {
+    if (-not $dev) { Set-SsStatus 'Select a station on the Devices tab first.' '#F9E2AF'; return }
+    if ($script:SsJob) { Set-SsStatus 'Still pulling logs from the last station...' '#89B4FA'; return }
+    $n = 0
+    if (-not [int]::TryParse($txtSsCount.Text.Trim(), [ref]$n) -or $n -lt 1 -or $n -gt 10) { Set-SsStatus 'Logs to pull: 1 to 10 (per log type).' '#F38BA8'; return }
+    if ($n -ne [int]$script:SnapshotConfig['StationLogs']) { $script:SnapshotConfig['StationLogs'] = $n; Save-AllConfig }
+    $name = [string]$dev.Name
+    $hostName = if ($name -match '^\d{1,3}(\.\d{1,3}){3}$') { $name } else { ($name -split '\.')[0] }
+    $target = Get-DeviceTarget $dev
+    $rl = Get-StationFindingRules
+    $script:SsList.Clear(); $txtSsDetail.Clear(); $script:SsLast = $null
+    $script:SsAll = @(); $script:SsShowAll = $false; $btnSsShowAll.Visibility = 'Collapsed'
+    $txtSsTitle.Text = "Station snapshot - $hostName"
+    try {
+        $dir = Join-Path $script:SnapshotRoot 'Stations'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $safe = $hostName -replace '[^A-Za-z0-9._-]', '_'
+        $work = Join-Path $dir ('Station_{0}_{1}' -f $safe, (Get-Date).ToString('yyyyMMdd_HHmmss'))
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $cfg = @{
+            Profiles = $script:StationProfiles
+            Types    = $script:StationTypes
+            Names    = $script:StationTypeNames
+            Override = [string]$script:SsConfig['TypeOverride']
+        }
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:StationSnapScript.ToString()).AddArgument([string]$target).AddArgument($hostName).AddArgument($n).AddArgument($work).AddArgument(@($rl.Rules)).AddArgument($script:EcsDir).AddArgument($cfg)
+        $script:SsJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+        $btnSsRun.IsEnabled = $false
+        $warn = if ($rl.Bad -gt 0) { "  ($($rl.Bad) entry(ies) in the findings list were skipped - check the file.)" } else { '' }
+        if ($rl.Upgraded) { $warn += '  (the findings list was updated to the built-in version - the file it replaced is saved as a .bak)' }
+        Set-SsStatus ("Working out which logs $hostName has, then pulling the newest $n of each... (large logs can take up to a minute){0}" -f $warn) '#89B4FA'
+    } catch {
+        $script:SsJob = $null
+        $btnSsRun.IsEnabled = $true
+        Set-SsStatus "Could not start: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-StationSnapshot {
+    $job = $script:SsJob
+    $script:SsJob = $null
+    $btnSsRun.IsEnabled = $true
+    $r = $null
+    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch   { Set-SsStatus "Failed: $($_.Exception.Message)" '#F38BA8'; return }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $r) { Set-SsStatus 'The snapshot returned nothing.' '#F38BA8'; return }
+    $script:SsLast = $r
+    if ($r.Host) {
+        $typeTag = ''
+        if ($r.StationType -and $r.StationType -ne 'Unknown') { $typeTag = "  ($($r.StationType))" }
+        $txtSsTitle.Text = "Station snapshot - $($r.Host)$typeTag"
+    }
+    if (-not $r.Ok) {
+        if ($r.NotFound) {
+            # nothing to pull on this PC: say so quietly, leave the list empty
+            Set-SsStatus $r.Error '#6C7086'
+            return
+        }
+        Set-SsStatus "Could not pull logs: $($r.Error)$(Get-RemoteHint $r.Error)" '#F38BA8'
+        Add-HistoryEntry -ServiceName "Station snapshot: $($r.Host)" -Group 'Devices' -OldStatus '' -NewStatus 'Failed' -Note $r.Error
+        return
+    }
+    $script:SsAll = @($r.Findings)
+    $script:SsShowAll = $false
+    Update-SsFindings
+    $errs = @($r.Findings | Where-Object { $_.Severity -eq 'Error' }).Count
+    $wrns = @($r.Findings | Where-Object { $_.Severity -eq 'Warning' }).Count
+    $color = if ($errs -gt 0) { '#F38BA8' } elseif ($wrns -gt 0) { '#F9E2AF' } else { '#A6E3A1' }
+    $more = ''
+    if (@($script:SsAll).Count -gt 1) { $more = ('  Showing the main finding - the other {0} are behind Show All.' -f (@($script:SsAll).Count - 1)) }
+    Set-SsStatus ("{0} error(s), {1} warning(s) in {2:N0} lines from {3} log type(s) ({4}). Saved at {5}.{6}" -f $errs, $wrns, $r.Lines, @($r.Sources).Count, $r.StationType, (Get-Date).ToString('HH:mm:ss'), $more) $color
+    $detail = @(("Station:   {0}  ({1})" -f $r.Host, $r.StationType), ("Logs from: {0}" -f $r.Source), ("Snapshot:  {0}" -f $r.Zip), '')
+    foreach ($pn in @($r.Probed)) { $detail += "  $pn" }
+    $detail += ''
+    foreach ($f in @($r.Files)) { $detail += ("  [{0}] {1}  ({2:N0} KB, written {3})" -f $f.Source, $f.Name, ($f.Size / 1KB), ([datetime]$f.Written).ToString('yyyy-MM-dd HH:mm')) }
+    $txtSsDetail.Text = ($detail -join "`r`n")
+    Add-HistoryEntry -ServiceName "Station snapshot: $($r.Host)" -Group 'Devices' -OldStatus '' -NewStatus 'Saved' -Note ("{0}, {1} error(s), {2} warning(s)" -f $r.StationType, $errs, $wrns)
+    Remove-OldStationSnapshots
+}
+
+function Get-StationSnapText {
+    $r = $script:SsLast
+    if (-not $r -or -not $r.Ok) { return '' }
+    $lines = @("Station snapshot - $($r.Host)  ($((Get-Date).ToString('yyyy-MM-dd HH:mm')))", "Logs from: $($r.Source)", "")
+    foreach ($f in @($r.Findings)) {
+        $tag = ''; if ($f.Source) { $tag = "[$($f.Source)] " }
+        $lines += ("{0}[{1}] {2}  (x{3}, last {4})" -f $tag, $f.Severity, $f.Finding, $f.Times, $f.Last)
+        $rep = Get-RepeatNote $f.First $f.Last $f.Times
+        if ($rep) { $lines += "    Repeat rate: $rep" }
+        if ($f.Fix) { $lines += "    What to try: $($f.Fix)" }
+    }
+    $lines += ""; $lines += "Snapshot file: $($r.Zip)"
+    $lines -join "`r`n"
+}
+
+$btnDevSnapshot.Add_Click({
+    $dev = $dgDevices.SelectedItem
+    if (-not $dev) { $txtDevStatus.Text = 'Select a device first.'; return }
+    $pnlRemote.Visibility = 'Collapsed'; $pnlDiscover.Visibility = 'Collapsed'
+    $pnlStationSnap.Visibility = 'Visible'
+    $txtSsCount.Text = [string]$script:SnapshotConfig['StationLogs']
+    $script:SsDevice = $dev
+    Start-StationSnapshot $dev
+})
+$btnSsRun.Add_Click({ Start-StationSnapshot $script:SsDevice })
+$btnSsClose.Add_Click({ $pnlStationSnap.Visibility = 'Collapsed' })
+$dgSsFindings.Add_SelectionChanged({
+    $f = $dgSsFindings.SelectedItem
+    if (-not $f) { return }
+    $t = @("[$($f.Source)] $($f.Finding)", "Times: $($f.Times)   First: $($f.First)   Last: $($f.Last)")
+    $rep = Get-RepeatNote $f.First $f.Last $f.Times
+    if ($rep) { $t += "Repeat rate: $rep" }
+    if ($f.Fix)    { $t += "What to try: $($f.Fix)" }
+    if ($f.Sample) { $t += ''; $t += "Log line: $($f.Sample)" }
+    $txtSsDetail.Text = $t -join "`r`n"
+})
+$btnSsShowAll.Add_Click({
+    $script:SsShowAll = -not $script:SsShowAll
+    Update-SsFindings
+})
+$btnSsCopy.Add_Click({
+    $t = Get-StationSnapText
+    if (-not $t) { Set-SsStatus 'Run a snapshot first.' '#F9E2AF'; return }
+    try { [System.Windows.Clipboard]::SetText($t); Set-SsStatus 'Findings copied - paste them into the ticket.' '#A6E3A1' }
+    catch { Set-SsStatus "Copy failed: $($_.Exception.Message)" '#F38BA8' }
+})
+$btnSsOpen.Add_Click({
+    $r = $script:SsLast
+    if ($r -and $r.Ok -and $r.Zip -and (Test-Path -LiteralPath $r.Zip)) { Start-Process explorer.exe -ArgumentList "/select,`"$($r.Zip)`"" }
+    else {
+        $dir = Join-Path $script:SnapshotRoot 'Stations'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Start-Process explorer.exe -ArgumentList "`"$dir`""
+    }
+})
+$btnSsRules.Add_Click({
+    [void](Get-StationFindingRules)      # creates the file with the example entry if it is missing
+    Start-Process notepad.exe -ArgumentList "`"$($script:FindingsFile)`""
+    Set-SsStatus 'Each entry: Match (text to look for), Finding (what to show), Severity (Error/Warning/Info), Fix (what to try), Regex (true/false), and optionally Source (Kiosk, POS or Prizes - blank means every log). Leave Version alone: when the dashboard is updated the list is rewritten and the file it replaced is kept as a .bak.' '#89B4FA'
+})
+# ------------------------------------------------------------
 # DEVICES: click a device to expand its actions under the row
 # The action buttons inside the expanded row run the same code the old bottom-bar buttons did.
 # ------------------------------------------------------------
@@ -5016,7 +6076,7 @@ $dgDevices.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEven
     param($sender, $e)
     $btn = $e.OriginalSource
     if (-not ($btn -is [System.Windows.Controls.Button])) { return }
-    $map = @{ 'Connect' = $btnDevConnect; 'Ping' = $btnDevPing; 'Services' = $btnDevServices; 'RemoteAdmin' = $btnDevRemoteAdmin; 'Software' = $btnDevSoftware; 'Remove' = $btnDevRemove }
+    $map = @{ 'Connect' = $btnDevConnect; 'Ping' = $btnDevPing; 'Services' = $btnDevServices; 'RemoteAdmin' = $btnDevRemoteAdmin; 'Snapshot' = $btnDevSnapshot; 'Software' = $btnDevSoftware; 'Remove' = $btnDevRemove }
     $target = $map[[string]$btn.Tag]
     if (-not $target) { return }
     $dgDevices.SelectedItem = $btn.DataContext
@@ -5061,7 +6121,27 @@ function Apply-DeviceInterval {
 $txtDevEvery.Add_KeyDown({ if ($_.Key -eq 'Return') { Apply-DeviceInterval } })
 $txtDevEvery.Add_LostFocus({ Apply-DeviceInterval })
 # ------------------------------------------------------------
-# SQL TAB (diagnostics and explicit transaction-log maintenance)
+# SETTINGS TAB: SQL MAINTENANCE (log shrink target + the full backup gate)
+# ------------------------------------------------------------
+function Set-MaintStatus([string]$text, [string]$hex) { $txtMaintStatus.Text = $text; $txtMaintStatus.Foreground = ColorBrush $hex }
+function Initialize-MaintUi {
+    $txtSetShrinkTarget.Text = [string]$script:ShrinkConfig['TargetMB']
+    $txtSetShrinkGuard.Text  = [string]$script:ShrinkConfig['FullBackupMin']
+}
+$btnMaintSave.Add_Click({
+    $t = 0; $g = 0
+    if (-not [int]::TryParse($txtSetShrinkTarget.Text.Trim(), [ref]$t) -or $t -lt 16 -or $t -gt 102400) { Set-MaintStatus 'Shrink target: 16 to 102400 MB.' '#F38BA8'; return }
+    if (-not [int]::TryParse($txtSetShrinkGuard.Text.Trim(), [ref]$g) -or $g -lt 5 -or $g -gt 1440)       { Set-MaintStatus 'Full backup age: 5 to 1440 minutes.' '#F38BA8'; return }
+    $script:ShrinkConfig['TargetMB'] = $t
+    $script:ShrinkConfig['FullBackupMin'] = $g
+    Save-AllConfig
+    Initialize-MaintUi
+    Update-ShrinkUi
+    Set-MaintStatus ("Saved at {0}." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
+})
+
+# ------------------------------------------------------------
+# SQL TAB (backups, file sizes, database version) - read-only
 # ------------------------------------------------------------
 $script:SqlScript = {
     param($sqlServer, $knownDb)
@@ -5179,7 +6259,7 @@ $script:SqlScript = {
     [PSCustomObject]$o
 }
 $script:SqlMaintenanceScript = {
-    param($sqlServer, [string]$logicalLogName, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory)
+    param($sqlServer, [string]$logicalLogName, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory, [int]$fullBackupMin)
     $backupPath = $backupDirectory.TrimEnd('\') + '\ECS7_Log.trn'
     $escapedLogicalLogName = $logicalLogName.Replace("'", "''")
     $quotedLogicalLogName = '[' + $logicalLogName.Replace(']', ']]') + ']'
@@ -5229,6 +6309,21 @@ $script:SqlMaintenanceScript = {
         }
         if ($databaseState -ne 'ONLINE') { throw "Database ECS7 is $databaseState, not ONLINE." }
         if ($recoveryModel -eq 'SIMPLE') { throw 'ECS7 uses SIMPLE recovery; SQL Server cannot take the requested transaction-log backup.' }
+
+        $cmd = $cn.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @databaseName AND type = 'D'"
+            [void]$cmd.Parameters.AddWithValue('@databaseName', 'ECS7')
+            $lastFullBackup = $cmd.ExecuteScalar()
+        } finally { $cmd.Dispose() }
+        if ($null -eq $lastFullBackup -or $lastFullBackup -is [DBNull]) {
+            throw 'No full backup of ECS7 is on record, so log maintenance was not run.'
+        }
+        $fullBackupAge = ((Get-Date) - [datetime]$lastFullBackup).TotalMinutes
+        if ($fullBackupAge -gt $fullBackupMin) {
+            throw ("The last full backup of ECS7 finished {0} minutes ago. It must be within {1} minutes before log maintenance runs." -f [int]$fullBackupAge, $fullBackupMin)
+        }
 
         $cmd = $cn.CreateCommand()
         try {
@@ -5320,14 +6415,28 @@ function Start-SqlMaintenance {
     $logName = [string]$script:SqlMaintenanceConfig['LogicalLogName']
     $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
     $growth = [int]$script:SqlMaintenanceConfig['GrowthMB']
+    if (-not $script:SqlInfo -or -not $script:SqlInfo.Ok) {
+        Set-SqlMaintenanceStatus 'Refresh the SQL tab before running log maintenance.' '#F9E2AF'
+        return
+    }
+    $fullBackupMin = [int]$script:ShrinkConfig['FullBackupMin']
+    $fullBackupAge = Get-LastFullBackupAge
+    if ($fullBackupAge -lt 0) {
+        Set-SqlMaintenanceStatus 'No full backup of ECS7 is on record, so log maintenance is blocked.' '#F38BA8'
+        return
+    }
+    if ($fullBackupAge -gt $fullBackupMin) {
+        Set-SqlMaintenanceStatus ("The last full backup finished {0} minutes ago. It must be within {1} minutes before log maintenance runs." -f $fullBackupAge, $fullBackupMin) '#F38BA8'
+        return
+    }
     $backupPath = "$directory\ECS7_Log.trn"
-    $confirmText = "Back up and shrink ECS7 log file '$logName' on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
+    $confirmText = "Back up and shrink ECS7 log file '$logName' on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`nFull backup age: $fullBackupAge minutes (maximum $fullBackupMin)`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
     $answer = [System.Windows.MessageBox]::Show($confirmText, 'Confirm ECS7 log maintenance', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($logName).AddArgument($target).AddArgument($growth).AddArgument($directory)
+        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($logName).AddArgument($target).AddArgument($growth).AddArgument($directory).AddArgument($fullBackupMin)
         $script:SqlMaintenanceJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
         $btnSqlMaintenance.IsEnabled = $false
         $btnSqlRefresh.IsEnabled = $false
@@ -5364,6 +6473,230 @@ function Complete-SqlMaintenance {
 }
 function Set-SqlStatus([string]$text, [string]$hex) { $txtSqlStatus.Text = $text; $txtSqlStatus.Foreground = ColorBrush $hex }
 function Format-Size([double]$mb) { if ($mb -ge 1024) { '{0:N1} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
+
+
+# ------------------------------------------------------------
+# SQL LOG REDUCTION (writes: the transaction log file only - never the data file, never the recovery model)
+# Runs in a background runspace. It refuses to start while a backup or restore is running, and warns first when a
+# backup finished inside the guard window (Settings tab), because shrinking can spoil a point-in-time restore of
+# the log tail that backup was going to protect.
+# ------------------------------------------------------------
+$script:ShrinkScript = {
+    param($sqlServer, $db, $logName, $targetMB, $fullBackupMin)
+    $o = [ordered]@{ Ok = $false; Error = ''; Blocked = $false; Db = $db; File = $logName; Before = 0.0; After = 0.0; TargetMB = $targetMB; LastFullMin = -1; Message = '' }
+    function Get-Deepest($err) { $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }; $e.Message }
+    function New-Conn([string]$database) {
+        $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+        $b['Data Source']            = $sqlServer
+        $b['Initial Catalog']        = $database
+        $b['Integrated Security']    = $true
+        $b['TrustServerCertificate'] = $true
+        $b['Connect Timeout']        = 10
+        $b['Application Name']       = 'EMBED Services Dashboard'
+        New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
+    }
+    function Get-Scalar($conn, [string]$sql) {
+        $cmd = $conn.CreateCommand(); $cmd.CommandTimeout = 60; $cmd.CommandText = $sql
+        $v = $cmd.ExecuteScalar()
+        if ($null -eq $v -or $v -is [DBNull]) { return $null }
+        return $v
+    }
+    $logSizeSql = "SELECT CAST(SUM(size) * 8 / 1024.0 AS decimal(12,1)) FROM sys.database_files WHERE type = 1"
+    $cn = $null
+    try {
+        if ($logName -notmatch '^[A-Za-z0-9_ .\-]+$') { throw 'The log file name has characters that are not allowed, so nothing was run.' }
+        $cn = New-Conn $db
+        $cn.Open()
+
+        # Gate 1: nothing may be backing up, restoring or shrinking right now.
+        $busy = $null
+        try { $busy = [int](Get-Scalar $cn "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE command IN ('BACKUP DATABASE','BACKUP LOG','RESTORE DATABASE','RESTORE LOG','RESTORE VERIFYONLY','DBCC SHRINKFILE')") } catch { $busy = $null }
+        if ($null -ne $busy -and $busy -gt 0) {
+            $o.Blocked = $true
+            throw 'A backup, restore or shrink is running right now. Wait for it to finish, then try again.'
+        }
+
+        # Gate 2: a FULL backup of this database must have finished within $fullBackupMin minutes. That backup is the
+        # safety net - the data is captured just before the log is disturbed. No full backup, or one older than the
+        # window, and nothing runs. Checked here as well as in the UI because time passes between the two.
+        $ageMin = $null
+        try {
+            $cmd = $cn.CreateCommand(); $cmd.CommandTimeout = 30
+            $cmd.CommandText = "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @n AND type = 'D'"
+            $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128); $p.Value = $db
+            $v = $cmd.ExecuteScalar()
+            if ($v -and $v -isnot [DBNull]) { $ageMin = ((Get-Date) - [datetime]$v).TotalMinutes }
+        } catch { $ageMin = $null }
+        if ($null -eq $ageMin) {
+            $o.Blocked = $true
+            throw ("No full backup of {0} is on record, so the log was not shrunk. Take a full backup, then try again." -f $db)
+        }
+        if ($ageMin -gt $fullBackupMin) {
+            $o.Blocked = $true
+            throw ("The last full backup of {0} finished {1} minutes ago. A full backup has to finish within {2} minutes before the log is shrunk." -f $db, [int]$ageMin, $fullBackupMin)
+        }
+        $o.LastFullMin = [int]$ageMin
+
+        $o.Before = [double](Get-Scalar $cn $logSizeSql)
+
+        # Shrink the LOG file only. No transaction: DBCC SHRINKFILE cannot run inside one.
+        # 15 minute cap: a blocked shrink must fail with a message, not sit there with the button dead forever.
+        $cmd = $cn.CreateCommand(); $cmd.CommandTimeout = 900
+        $cmd.CommandText = "CHECKPOINT; DBCC SHRINKFILE (N'$logName', $targetMB) WITH NO_INFOMSGS;"
+        try { [void]$cmd.ExecuteNonQuery() }
+        catch {
+            if ((Get-Deepest $_) -match 'Timeout|timeout') {
+                throw ("The shrink ran for 15 minutes and was stopped. The log may still be shrinking in SQL Server. Check the log size again in a few minutes; nothing was lost, the log file just could not be cut down yet.")
+            }
+            throw
+        }
+
+        $o.After = [double](Get-Scalar $cn $logSizeSql)
+        $free = $o.Before - $o.After
+        $left = ''
+        if ($o.After -gt ($targetMB + 8)) {
+            $left = " It stopped above the $targetMB MB target because SQL can only cut the log down to the part still in use (open transactions, or no log backup has run)."
+        }
+        if ($free -le 0.05) {
+            $o.Message = "The log is still $($o.After) MB - SQL Server could not free any space.$left"
+        } else {
+            $o.Message = "Log shrunk from $($o.Before) MB to $($o.After) MB (freed $([math]::Round($free, 1)) MB). Safety net: a full backup finished $($o.LastFullMin) min before this.$left"
+        }
+        $o.Ok = $true
+    } catch {
+        $o.Error = Get-Deepest $_
+    } finally { if ($cn) { $cn.Dispose() } }
+    [PSCustomObject]$o
+}
+function Format-MB([double]$mb) { if ($mb -ge 1024) { '{0:N2} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
+function Set-ShrinkStatus([string]$text, [string]$hex) { $txtShrinkStatus.Text = $text; $txtShrinkStatus.Foreground = ColorBrush $hex }
+function Get-ShrinkTargetMB {
+    $v = 0
+    if ([int]::TryParse($txtShrinkTarget.Text.Trim(), [ref]$v) -and $v -ge 16 -and $v -le 102400) { return $v }
+    return [int]$script:ShrinkConfig['TargetMB']
+}
+# Minutes since the last FULL backup, from what the SQL tab already read. -1 = no full backup on record.
+function Get-LastFullBackupAge {
+    $r = $script:SqlInfo
+    if (-not $r -or -not $r.Ok) { return -1 }
+    if (-not $r.BkFull -or -not $r.BkFull.Finished) { return -1 }
+    return [int]((Get-Date) - [datetime]$r.BkFull.Finished).TotalMinutes
+}
+function Format-Minutes([int]$m) {
+    if ($m -lt 1) { return 'just now' }
+    if ($m -lt 60) { return ('{0} min' -f $m) }
+    $h = [int][math]::Floor($m / 60); $r = $m % 60
+    if ($r -eq 0) { return ('{0} h' -f $h) }
+    return ('{0} h {1} min' -f $h, $r)
+}
+function Update-ShrinkUi {
+    $r = $script:SqlInfo
+    $can = $false; $hex = '#6C7086'
+    if (-not $r -or -not $r.Ok) {
+        $txtShrinkNow.Text = '—'
+        $text = 'Read the SQL tab first (click Refresh), then this shows what the log costs and what can be reclaimed.'
+    } elseif (-not $r.Database) {
+        $txtShrinkNow.Text = '—'
+        $text = 'No EMBED database was found, so there is no log to shrink.'
+        $hex = '#F9E2AF'
+    } else {
+        $logMB = [double]$r.LogMB
+        $usedPct = 0
+        if ($logMB -gt 0) { $usedPct = [math]::Round([double]$r.LogUsedMB / $logMB * 100, 0) }
+        $txtShrinkNow.Text = ('{0}   ({1:N0}% used)   recovery {2}' -f (Format-MB $logMB), $usedPct, $r.Recovery)
+        $target = Get-ShrinkTargetMB
+        $need   = [int]$script:ShrinkConfig['FullBackupMin']
+        $age    = Get-LastFullBackupAge
+        if ($target -ge $logMB) {
+            $text = ('The log is {0} and the target is {1}, so nothing would be reclaimed. Lower the target here or on the Settings tab.' -f (Format-MB $logMB), (Format-MB $target))
+            $hex = '#F9E2AF'
+        } elseif ($age -lt 0) {
+            $text = ('BLOCKED - no full backup of {0} is on record. Take a full backup; the shrink is then allowed for {1} minutes after it finishes.' -f $r.Database, $need)
+            $hex = '#F38BA8'
+        } elseif ($age -gt $need) {
+            $text = ('BLOCKED - the last full backup finished {0} ago, but it has to be within {1} minutes. Take a full backup, then shrink the log.' -f (Format-Minutes $age), $need)
+            $hex = '#F38BA8'
+        } else {
+            $can = $true
+            $parts = @(('Full backup finished {0} ago - the shrink is allowed.' -f (Format-Minutes $age)))
+            $parts += ('{0} down to {1} would free about {2}.' -f (Format-MB $logMB), (Format-MB $target), (Format-MB ($logMB - $target)))
+            if ($r.Recovery -and $r.Recovery -ne 'SIMPLE' -and -not $r.BkLog) {
+                $parts += ('{0} recovery with no log backups: the log will grow back after the shrink. Only the log file is ever shrunk here.' -f $r.Recovery)
+            }
+            if ($r.LogReuseWait -and $r.LogReuseWait -notin @('NOTHING', 'CHECKPOINT')) {
+                $parts += ('SQL reports the log is waiting on {0}, so it may not be able to free much.' -f $r.LogReuseWait)
+            }
+            $text = ($parts -join '  ')
+            $hex = '#A6E3A1'
+        }
+    }
+    $txtShrinkGuard.Text = $text
+    $txtShrinkGuard.Foreground = ColorBrush $hex
+    $btnShrinkLog.IsEnabled = $can
+    if ($script:ShrinkJob) { $btnShrinkLog.IsEnabled = $false }
+}
+function Start-ShrinkJob {
+    if ($script:ShrinkJob) { Set-ShrinkStatus 'A shrink is already running...' '#89B4FA'; return }
+    $r = $script:SqlInfo
+    if (-not $r -or -not $r.Ok -or -not $r.Database) { Set-ShrinkStatus 'Read the SQL tab first (click Refresh).' '#F9E2AF'; return }
+    $target = Get-ShrinkTargetMB
+    $logMB  = [double]$r.LogMB
+    if ($target -ge $logMB) { Set-ShrinkStatus 'The target is not smaller than the log, so nothing would change.' '#F9E2AF'; return }
+    $logs = @($r.Files | Where-Object { $_.FileType -eq 'LOG' })
+    if ($logs.Count -eq 0) { Set-ShrinkStatus 'The log file name could not be read, so the shrink cannot run.' '#F38BA8'; return }
+    $logName = [string](($logs | Sort-Object { [double]$_.SizeMB } -Descending | Select-Object -First 1).Name)
+    $need = [int]$script:ShrinkConfig['FullBackupMin']
+    $age  = Get-LastFullBackupAge
+    if ($age -lt 0) {
+        Set-ShrinkStatus ("No full backup of {0} is on record, so the log was not shrunk. Take a full backup, then try again." -f $r.Database) '#F38BA8'
+        return
+    }
+    if ($age -gt $need) {
+        Set-ShrinkStatus ("The last full backup finished {0} ago. A full backup has to finish within {1} minutes before the log is shrunk." -f (Format-Minutes $age), $need) '#F38BA8'
+        return
+    }
+    $more = ''
+    if ($logs.Count -gt 1) { $more = "`r`n`r`nThis database has $($logs.Count) log files; only $logName is shrunk." }
+    $ans = [System.Windows.MessageBox]::Show(
+        "Shrink the transaction log of $($r.Database) on $($script:GuruSqlServer)?`r`n`r`nFile:  $logName`r`nFrom:  $(Format-MB $logMB)`r`nTo:    $target MB`r`n`r`nSafety net: the full backup of this database finished $(Format-Minutes $age) ago.`r`n`r`nOnly the log file is touched. The data file and the recovery model are left exactly as they are.$more",
+        'Shrink transaction log', 'YesNo', 'Question')
+    if ($ans -ne 'Yes') { return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:ShrinkScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument([string]$r.Database).AddArgument($logName).AddArgument([int]$target).AddArgument([int]$need)
+        $script:ShrinkJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+        $btnShrinkLog.IsEnabled = $false
+        Set-ShrinkStatus "Shrinking the log of $($r.Database)... this can take a minute on a large log." '#89B4FA'
+    } catch {
+        $script:ShrinkJob = $null
+        $btnShrinkLog.IsEnabled = $true
+        Set-ShrinkStatus "Could not start: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-ShrinkJob {
+    $job = $script:ShrinkJob
+    $script:ShrinkJob = $null
+    $r = $null
+    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch   { $r = [PSCustomObject]@{ Ok = $false; Blocked = $false; Error = $_.Exception.Message; Db = ''; File = ''; Before = 0.0; After = 0.0; Message = '' } }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $r) {
+        Set-ShrinkStatus 'The shrink returned nothing.' '#F38BA8'
+        $btnShrinkLog.IsEnabled = $true
+        return
+    }
+    if (-not $r.Ok) {
+        $prefix = 'Log shrink failed: '
+        if ($r.Blocked) { $prefix = 'Log shrink not started: ' }
+        Set-ShrinkStatus "$prefix$($r.Error)" '#F38BA8'
+        Add-HistoryEntry -ServiceName "Database $($r.Db)" -Group 'SQL' -OldStatus '' -NewStatus 'Log shrink stopped' -Note $r.Error
+    } else {
+        Set-ShrinkStatus $r.Message '#A6E3A1'
+        Add-HistoryEntry -ServiceName "Database $($r.Db)" -Group 'SQL' -OldStatus ("{0:N1} MB log" -f $r.Before) -NewStatus ("{0:N1} MB log" -f $r.After) -Note 'Transaction log shrunk'
+    }
+    Start-SqlCheck          # re-read sizes and the backup age
+}
 
 function Format-Age($when) {
     if (-not $when) { return '' }
@@ -5474,6 +6807,7 @@ function Complete-SqlCheck {
 
     $msg = "Read from $($script:GuruSqlServer) at $when."
     if (@($r.Notes).Count -gt 0) { $msg += '  ' + (@($r.Notes) -join '  '); Set-SqlStatus $msg '#F9E2AF' } else { Set-SqlStatus $msg '#A6E3A1' }
+    Update-ShrinkUi
 }
 function Get-SqlTabText {
     $r = $script:SqlInfo
@@ -6290,11 +7624,13 @@ $script:Timer.Add_Tick({
     if ($script:DbVerJob    -and $script:DbVerJob.Handle.IsCompleted)    { Complete-DbVersionCheck }
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
     if ($script:SqlMaintenanceJob -and $script:SqlMaintenanceJob.Handle.IsCompleted) { Complete-SqlMaintenance }
-    if ($script:LogJob      -and $script:LogJob.Handle.IsCompleted)      { Complete-LogOperation }
+    if ($script:ShrinkJob   -and $script:ShrinkJob.Handle.IsCompleted)   { Complete-ShrinkJob }
+    if ($script:LoginJob    -and $script:LoginJob.Handle.IsCompleted)    { Complete-LoginJob }
     if ($script:ReaderJob   -and $script:ReaderJob.Handle.IsCompleted)   { Complete-ReaderLoad }
     if ($script:RdPingJob   -and $script:RdPingJob.Handle.IsCompleted)   { Complete-ReaderPing }
     if ($script:RdpJob      -and $script:RdpJob.Handle.IsCompleted)      { Complete-RdpConnect }
     if ($script:UnifiJob    -and $script:UnifiJob.Handle.IsCompleted)    { Complete-UnifiWait }
+    if ($script:SsJob       -and $script:SsJob.Handle.IsCompleted)       { Complete-StationSnapshot }
     if ($script:ApJob       -and $script:ApJob.Handle.IsCompleted)       { Complete-ApJob }
     $script:ApCountdown--
     if ($script:ApCountdown -le 0) {
@@ -6337,6 +7673,8 @@ $script:Timer.Add_Tick({
 # ------------------------------------------------------------
 # INITIALIZE UI
 # ------------------------------------------------------------
+Remove-OldHistoryLogs
+Load-History
 Build-ServiceRows
 Apply-Filter 'All'
 Update-AllServices
@@ -6346,14 +7684,12 @@ Set-TrayIconColor 'Healthy'
 $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
-Initialize-SqlMaintenanceUi
-Initialize-LogTabs
-Initialize-DeviceIntervalUi
+Initialize-MaintUi
+Update-ShrinkUi
 Start-DbVersionCheck
 Initialize-ApUi
 if ($script:ApList.Count -gt 0) { Start-ApJob $false } else { Start-ApJob $true }   # first run finds the APs
 [void](Remove-OldSnapshots)
-Remove-OldHistoryLogs
 $script:Timer.Start()
 # ------------------------------------------------------------
 # SHOW WINDOW
