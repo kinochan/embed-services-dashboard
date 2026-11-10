@@ -1774,6 +1774,7 @@ $btnRestartAll    = Get-Ctrl 'btnRestartAll'
 $ServicePanel     = Get-Ctrl 'ServicePanel'
 $HistoryGrid      = Get-Ctrl 'HistoryGrid'
 $EventsGrid       = Get-Ctrl 'EventsGrid'
+$ServiceSubTabs   = Get-Ctrl 'ServiceSubTabs'
 $tabEvents        = Get-Ctrl 'tabEvents'
 $chkEventInformation = Get-Ctrl 'chkEventInformation'
 $chkEventWarning = Get-Ctrl 'chkEventWarning'
@@ -2506,8 +2507,8 @@ function Invoke-EventsRefresh {
         $statusBar.Text = "Could not refresh event list: $($_.Exception.Message)"
     }
 }
-$tabEvents.Add_Selected({
-    if ($_.OriginalSource -eq $tabEvents) { Invoke-EventsRefresh }
+$ServiceSubTabs.Add_SelectionChanged({
+    if ($_.OriginalSource -eq $ServiceSubTabs -and $tabEvents.IsSelected) { Invoke-EventsRefresh }
 })
 $btnRefreshEvents.Add_Click({ Invoke-EventsRefresh })
 $btnClearEvents.Add_Click({
