@@ -1,6 +1,8 @@
 ﻿#Requires -Version 5.1
 <#
 EMBED Services Dashboard - Enhanced Edition (Optimized)
+Version 1 was just a simple service monitor. This version is a full-featured WPF dashboard for monitoring and controlling EMBED Windows services.
+Version 2 is a complete rewrite with a modern WPF interface, service dependency awareness, and many new features.
 WPF dashboard for monitoring and controlling EMBED Windows services.
 Features: Minimize-to-Tray, Status History Panel, Service Control Panel, health colors,
 Support Snapshots (auto-cleanup), Remote Services control, persistent History logs.
@@ -74,6 +76,11 @@ v2.23.11: A RedPOS has six prizes log families and five slots, and "RedPro - Err
        RedPro error log is now pulled on top of the count, because that is the file that says what broke. Its dated
        name ("RedPro - Error Log - 2026-11-05") is recognised as one family too, so yesterday's and last week's
        copies are not dragged in with it - only the newest is read. Raise "Logs to pull" for more cashier logs.
+v2.25: Combines the v2.23.11 station snapshots, software deployment, CenterEdge service, and full-backup-gated
+    transaction-log reduction with the v2.22.15 Event Viewer, remote-admin tasks, program-log viewer, and
+    per-service CPU, memory, and disk-rate monitoring, including AnyDesk service monitoring. History entries
+    reload from retained daily CSV logs when the dashboard starts.
+v2.25.2: Minor fixes and improvements to station snapshot and log handling. Also removed duplicate sql log entries.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -90,7 +97,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.23.11'
+$script:AppVersion = '2.25.2'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -104,16 +111,21 @@ $script:ServiceDefs = @(
     [ordered]@{ Name = 'MSSQLSERVER';       Display = 'SQL Server';                 Group = 'SQL'  }
     [ordered]@{ Name = 'SQLBrowser';        Display = 'SQL Browser';                Group = 'SQL'  }
     [ordered]@{ Name = 'TeamViewer';        Display = 'TeamViewer';                 Group = 'Remote'; MonitorOnly = $true }
+    [ordered]@{ Name = 'AnyDesk';           Display = 'AnyDesk';                    Group = 'Remote'; MonitorOnly = $true }
 )
 # Runtime state
 $script:HistoryList    = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$script:EventList      = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
 $script:PreviousStates = @{}
 $script:ServiceRows    = @{}
-$script:CountdownSecs  = 30
-$script:RefreshSecs    = 30     # service refresh (Settings tab, saved)
+$script:ServiceResourceMetrics = @{}
+$script:PreviousProcessSamples = @{}
+$script:NextServiceRefresh = [datetime]::MinValue
 $script:DeviceSecs     = 60     # device check (Devices tab, saved)
 $script:DeviceCountdown = 60
 $script:SqlJob         = $null  # background SQL tab check
+$script:SqlMaintenanceJob = $null
+$script:SqlMaintenanceConfig = @{ LogicalLogName = 'ECS7_log'; ShrinkTargetMB = 150; GrowthMB = 64; BackupDirectory = 'E:\SQL\BACKUP' }
 $script:LoginJob       = $null  # background Support Login job (SQL tab)
 $script:SqlInfo        = $null
 $script:LastSqlCheck   = [datetime]::MinValue
@@ -161,6 +173,7 @@ $script:SmtpConfig = @{          # email alert settings (saved to config.json)
 }
 $script:DataRoot       = 'C:\Program Files (x86)\ECS7\Dashboard'   # snapshots + history logs
 $script:EcsDir         = 'C:\Program Files (x86)\ECS7'             # scanned for EMBED versions and logs
+$script:LogRoot        = Join-Path $script:EcsDir 'Logs'
 $script:SnapshotRoot   = Join-Path $script:DataRoot 'Snapshots'
 $script:HistoryDir     = Join-Path $script:DataRoot 'History'
 $script:HistoryDays    = 3                                         # daily history CSVs older than this are deleted
@@ -168,10 +181,13 @@ $script:SnapshotConfig = @{ KeepCount = 5; MaxAgeDays = 14; StationLogs = 5 }   
 $script:SnapshotJob    = $null
 # v2.23: SQL log reduction (saved to config.json)
 $script:ShrinkConfig   = @{ TargetMB = 256; FullBackupMin = 30 }   # shrink only after a FULL backup this recent
-$script:ShrinkJob      = $null
 $script:SsConfig       = @{ TypeOverride = 'Auto' }                       # station log type: Auto, Kiosk, RedPOS or RedPro (saved)
 $script:RemoteJob      = $null
 $script:RemoteList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$script:RemoteAdminJob = $null
+$script:RemoteAdminList = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
+$script:RemoteAdminListHost = ''
+$script:RemoteAdminListTransport = ''
 $script:DbVerJob       = $null                                     # background database version check
 $script:DbVer          = $null                                     # last result (shown in the header badge)
 $script:LastDbVerCheck = [datetime]::MinValue
@@ -209,20 +225,18 @@ function Load-Config {
         try {
             return (Get-Content $path -Raw | ConvertFrom-Json)
         } catch {
-            return [PSCustomObject]@{ RefreshSeconds = 30 }
+            return [PSCustomObject]@{}
         }
     } else {
-        return [PSCustomObject]@{ RefreshSeconds = 30 }
+        return [PSCustomObject]@{}
     }
 }
 function Save-Config {
-    param([int]$RefreshSeconds)
     $path = "C:\Program Files (x86)\ECS7\config.json"
     try {
         $dir = Split-Path $path -Parent
         if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         @{
-            RefreshSeconds   = $RefreshSeconds
             DeviceSeconds    = $script:DeviceSecs
             AccessPoints     = @{
                 RangeStart = $script:ApConfig['RangeStart']; RangeEnd = $script:ApConfig['RangeEnd']
@@ -235,6 +249,7 @@ function Save-Config {
             AutoAddDiscovered = [bool]$script:AutoAddDiscovered
             Update           = $script:UpdateConfig
             SqlServer        = $script:GuruSqlServer
+            SqlMaintenance   = $script:SqlMaintenanceConfig
             Snapshot         = $script:SnapshotConfig
             Shrink           = $script:ShrinkConfig
 
@@ -254,11 +269,11 @@ function Save-Config {
 # ------------------------------------------------------------
 # XAML
 # ------------------------------------------------------------
-[xml]$XAML = @'
+[xml]$XAML = @"
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="EMBED Services Dashboard"
+    Title="EMBED Services Dashboard v$($script:AppVersion)"
     Width="1120" Height="820"
     MinWidth="860" MinHeight="520"
     WindowStartupLocation="CenterScreen"
@@ -521,13 +536,6 @@ function Save-Config {
         </StackPanel>
         <StackPanel Grid.Column="1" Orientation="Horizontal"
                     HorizontalAlignment="Center" VerticalAlignment="Center">
-          <Border Background="#313244" CornerRadius="12" Padding="12,4" Margin="10,0,10,0">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock Text="Refresh in " Foreground="#6C7086" FontSize="12" VerticalAlignment="Center"/>
-              <TextBlock x:Name="txtCountdown" Text="30s"
-                         Foreground="#CBA6F7" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
-            </StackPanel>
-          </Border>
           <Border x:Name="dbBadge" Background="#30CBA6F7" CornerRadius="12" Padding="12,4" Margin="0,0,10,0"
                   VerticalAlignment="Center" Cursor="Hand" ToolTip="Checking database version...">
             <StackPanel Orientation="Horizontal">
@@ -612,6 +620,54 @@ function Save-Config {
               </DataGrid>
             </Grid>
           </TabItem>
+                    <TabItem x:Name="tabEvents" Header="Events" Style="{StaticResource SubTabItem}">
+                        <Grid Background="#1E1E2E">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0" Background="#181825" Padding="16,9">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Foreground="#6C7086" FontSize="12"
+                                                         VerticalAlignment="Center"
+                                                         Text="Windows Event Viewer entries related to monitored services"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <CheckBox x:Name="chkEventInformation" Content="Information" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show Information-level events"/>
+                                        <CheckBox x:Name="chkEventWarning" Content="Warning" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show Warning-level events"/>
+                                        <CheckBox x:Name="chkEventError" Content="Error" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show Error-level events"/>
+                                        <CheckBox x:Name="chkEventCritical" Content="Critical" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,10,0"
+                                                  ToolTip="Show Critical-level events"/>
+                                        <Button x:Name="btnRefreshEvents" Content="Refresh Events"
+                                                        Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
+                                        <Button x:Name="btnClearEvents" Content="Clear View"
+                                                        Style="{StaticResource BtnBase}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <DataGrid x:Name="EventsGrid" Grid.Row="1" Margin="12,8,12,8"
+                                                ItemsSource="{Binding}">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="155"/>
+                                    <DataGridTextColumn Header="Level" Binding="{Binding Level}" Width="90"/>
+                                    <DataGridTextColumn Header="Event ID" Binding="{Binding EventId}" Width="90"/>
+                                    <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="170"/>
+                                    <DataGridTextColumn Header="Service" Binding="{Binding Service}" Width="160"/>
+                                    <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </TabItem>
           <TabItem Header="Summary" Style="{StaticResource SubTabItem}">
             <ScrollViewer Background="#1E1E2E" VerticalScrollBarVisibility="Auto">
               <StackPanel Margin="20,16,20,20">
@@ -677,7 +733,7 @@ function Save-Config {
           <Border Grid.Row="0" Background="#181825" Padding="16,9">
             <Grid>
               <TextBlock x:Name="txtSqlStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,200,0"
-                         Text="EMBED database status. Refreshes when you open this tab and every 24 hours. Two parts write: Support Login (logins) and Log Reduction (the log file only)."/>
+                         Text="EMBED database status. Refreshes when you open this tab and every 24 hours. Support Login and log file maintenance modify the database."/>
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="btnSqlCopy"    Content="Copy"       Style="{StaticResource BtnBase}" Margin="0,0,6,0" ToolTip="Copy everything on this tab for a ticket"/>
                 <Button x:Name="btnSqlRefresh" Content="↻  Refresh" Style="{StaticResource BtnBlue}"/>
@@ -791,37 +847,17 @@ function Save-Config {
                   </Grid>
                   <TextBlock x:Name="txtSqlFileWarn" Foreground="#F9E2AF" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
                   <TextBlock x:Name="txtSqlFiles" Foreground="#6C7086" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
-                </StackPanel>
-              </Border>
-              <!-- Log reduction (writes: the transaction log file only) -->
-              <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,12">
-                <StackPanel>
-                  <TextBlock Text="LOG REDUCTION" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                  <TextBlock Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"
-                             Text="Shrinks the transaction log file only. The data file and the recovery model are never changed. It is blocked unless a FULL backup of this database finished within the window on the Settings tab, and it never runs while a backup is in progress."/>
-                  <Grid>
-                    <Grid.ColumnDefinitions>
-                      <ColumnDefinition Width="130"/>
-                      <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions>
-                      <RowDefinition Height="Auto"/>
-                      <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Transaction log" Foreground="#6C7086" Margin="0,0,14,8" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="txtShrinkNow" Grid.Row="0" Grid.Column="1" Text="—" Foreground="#CDD6F4" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
-                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Shrink target" Foreground="#6C7086" VerticalAlignment="Center"/>
-                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal">
-                      <TextBox x:Name="txtShrinkTarget" Width="80" Margin="0,0,6,0" ToolTip="Megabytes to shrink the log file down to. The default comes from the Settings tab."/>
-                      <TextBlock Text="MB" Foreground="#6C7086" VerticalAlignment="Center"/>
-                    </StackPanel>
-                  </Grid>
-                  <TextBlock x:Name="txtShrinkGuard" Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
-                  <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                    <Button x:Name="btnShrinkLog"     Content="Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,6,0" ToolTip="Blocked unless a full backup finished within the window on the Settings tab. Runs CHECKPOINT then DBCC SHRINKFILE on the log file only."/>
-                    <Button x:Name="btnShrinkRefresh" Content="Re-check"   Style="{StaticResource BtnBase}"   Margin="0,0,12,0"/>
-                    <TextBlock x:Name="txtShrinkStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
-                  </StackPanel>
+                                    <Border Height="1" Background="#45475A" Margin="0,12,0,10"/>
+                                    <TextBlock Text="LOG FILE MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                                    <TextBlock x:Name="txtSqlMaintenancePlan" Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Button x:Name="btnSqlMaintenance" Grid.Column="0" Content="Backup + Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,10,0" ToolTip="Back up and shrink the ECS7 transaction log, then set and verify file growth limits."/>
+                                        <TextBlock x:Name="txtSqlMaintenanceStatus" Grid.Column="1" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                    </Grid>
                 </StackPanel>
               </Border>
               <!-- SQL Server -->
@@ -837,6 +873,47 @@ function Save-Config {
           </ScrollViewer>
         </Grid>
       </TabItem>
+            <!-- EMBED program logs -->
+            <TabItem Header="  Server Logs  " x:Name="tabLogs">
+                <Grid Background="#1E1E2E">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Border Grid.Row="0" Background="#181825" Padding="16,9">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="txtLogStatus" Grid.Column="0" Foreground="#6C7086" FontSize="12"
+                                                 VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"
+                                                 Text="Log files load from C:\Program Files (x86)\ECS7\Logs when this tab opens."/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <ComboBox x:Name="cmbLogSeverity" Width="130" SelectedIndex="0" Margin="0,0,6,0"
+                                          ToolTip="Show all lines, errors, warnings, or both">
+                                    <ComboBoxItem Content="All levels" Tag="All"/>
+                                    <ComboBoxItem Content="Errors" Tag="Error"/>
+                                    <ComboBoxItem Content="Warnings" Tag="Warning"/>
+                                    <ComboBoxItem Content="Errors + warnings" Tag="ErrorWarning"/>
+                                </ComboBox>
+                                <ComboBox x:Name="cmbLogTime" Width="125" SelectedIndex="0" Margin="0,0,6,0"
+                                          ToolTip="Filter by detected timestamps; lines without timestamps are hidden when a range is selected">
+                                    <ComboBoxItem Content="Any time" Tag="All"/>
+                                    <ComboBoxItem Content="Last hour" Tag="Hour"/>
+                                    <ComboBoxItem Content="Last 24 hours" Tag="Day"/>
+                                    <ComboBoxItem Content="Today" Tag="Today"/>
+                                </ComboBox>
+                                <TextBox x:Name="txtLogSearch" Width="190" Margin="0,0,6,0"
+                                                 ToolTip="Find text in the selected log's displayed tail"/>
+                                <Button x:Name="btnLogFind" Content="Find Next" Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
+                                <Button x:Name="btnLogRefresh" Content="↻  Refresh" Style="{StaticResource BtnBlue}"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <TabControl x:Name="LogProgramTabs" Grid.Row="1"/>
+                </Grid>
+            </TabItem>
         <!-- Readers -->
         <TabItem Header="  Readers  " x:Name="tabReaders">
           <Grid Background="#1E1E2E">
@@ -1070,6 +1147,8 @@ function Save-Config {
                               ToolTip="Joins the signed-in user's screen without signing them out. Opens a normal session when nobody is signed in."/>
                       <Button Tag="Ping"     Content="📶  Ping"          Style="{StaticResource BtnBlue}"   Margin="0,0,6,4"/>
                       <Button Tag="Services" Content="⚙  Services"       Style="{StaticResource BtnPurple}" Margin="0,0,6,4"/>
+                          <Button Tag="RemoteAdmin" Content="Admin Tasks..." Style="{StaticResource BtnPurple}" Margin="0,0,6,4"
+                              ToolTip="Run fixed remote RDP and approved service checks/actions."/>
                       <Button Tag="Snapshot" Content="📋  Snapshot"       Style="{StaticResource BtnBlue}"   Margin="0,0,6,4"
                               ToolTip="Pulls the newest logs from this station and lists what looks wrong"/>
                       <Button Tag="Software" Content="⬇  Software"       Style="{StaticResource BtnPurple}" Margin="0,0,20,4"/>
@@ -1125,7 +1204,7 @@ function Save-Config {
             </Border>
             <DataGrid x:Name="dgRemote" Grid.Row="1" Margin="12,8,12,8">
               <DataGrid.Columns>
-                <DataGridTextColumn Header="Service" Binding="{Binding Display}"   Width="*"/>
+                <DataGridTextColumn Header="Service / Process" Binding="{Binding Display}" Width="*"/>
                 <DataGridTextColumn Header="Name"    Binding="{Binding Name}"      Width="160"/>
                 <DataGridTextColumn Header="Status"  Binding="{Binding Status}"    Width="110">
                   <DataGridTextColumn.ElementStyle>
@@ -1134,12 +1213,14 @@ function Save-Config {
                       <Style.Triggers>
                         <DataTrigger Binding="{Binding Status}" Value="Running"><Setter Property="Foreground" Value="#A6E3A1"/></DataTrigger>
                         <DataTrigger Binding="{Binding Status}" Value="Stopped"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Status}" Value="Not running"><Setter Property="Foreground" Value="#F38BA8"/></DataTrigger>
                         <DataTrigger Binding="{Binding Status}" Value="Error"><Setter Property="Foreground" Value="#FAB387"/></DataTrigger>
                       </Style.Triggers>
                     </Style>
                   </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
                 <DataGridTextColumn Header="Startup" Binding="{Binding StartType}" Width="100"/>
+                <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="250"/>
               </DataGrid.Columns>
             </DataGrid>
             <Border Grid.Row="2" Background="#181825" Padding="16,9">
@@ -1150,6 +1231,58 @@ function Save-Config {
                 <Button x:Name="btnRemStack"   Content="↺  Restart EMBED Stack" Style="{StaticResource BtnPurple}" Visibility="Collapsed"/>
                 <TextBlock Text="Start / Stop / Restart act on the selected row" Foreground="#6C7086" FontSize="12"
                            VerticalAlignment="Center" Margin="14,0,0,0"/>
+              </StackPanel>
+            </Border>
+          </Grid>
+          <!-- Fixed remote-admin tasks; this is intentionally not an arbitrary command interface. -->
+          <Grid x:Name="pnlRemoteAdmin" Grid.RowSpan="3" Background="#1E1E2E" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Border Grid.Row="0" Background="#181825" Padding="16,9">
+              <StackPanel>
+                <WrapPanel VerticalAlignment="Center">
+                  <TextBlock Text="Computer:" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                  <TextBox x:Name="txtAdminHost" Width="170" Margin="0,0,8,0"
+                           ToolTip="For HTTP, use the exact host/IP listed in this PC's TrustedHosts. For HTTPS, use a hostname covered by the trusted target certificate."/>
+                  <ComboBox x:Name="cmbAdminTransport" Width="150" SelectedIndex="0" Margin="0,0,8,0"
+                            ToolTip="HTTP requires an exact TrustedHosts entry; HTTPS requires a trusted matching certificate; WMI/DCOM requires RPC firewall access.">
+                    <ComboBoxItem Content="HTTP (TrustedHosts)"/>
+                    <ComboBoxItem Content="HTTPS (TLS)"/>
+                    <ComboBoxItem Content="WMI / DCOM"/>
+                  </ComboBox>
+                  <Button x:Name="btnAdminCheck" Content="Check Connection / RDP" Style="{StaticResource BtnBlue}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnAdminEnableRdp" Content="Enable RDP" Style="{StaticResource BtnGreen}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnAdminEnableWinRm" Content="Enable WinRM (WMI)" Style="{StaticResource BtnGreen}" Margin="0,0,6,0"
+                          ToolTip="Uses WMI/DCOM to run the fixed WinRM quickconfig task on the target. Select WMI / DCOM first."/>
+                  <Button x:Name="btnAdminLoadServices" Content="Check Services" Style="{StaticResource BtnPurple}" Margin="0,0,6,0"/>
+                  <Button x:Name="btnAdminClose" Content="Close" Style="{StaticResource BtnBase}"/>
+                </WrapPanel>
+                <TextBlock Text="HTTP requires the exact target in this PC's TrustedHosts; HTTPS requires a trusted matching certificate; WMI/DCOM needs TCP 135 plus dynamic RPC firewall access. Use Enable WinRM (WMI) to configure the target's HTTP listener and firewall rule. Credentials are requested each time and never saved."
+                           Foreground="#F9E2AF" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Border>
+            <TextBlock Grid.Row="1" x:Name="txtAdminStatus" Foreground="#6C7086" FontSize="12"
+                       TextWrapping="Wrap" Margin="16,8,16,0"
+                       Text="Check the selected transport and RDP status before running a task."/>
+            <DataGrid x:Name="dgAdminServices" Grid.Row="2" Margin="12,8,12,8">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Service / Process" Binding="{Binding Display}" Width="*"/>
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="160"/>
+                <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="110"/>
+                <DataGridTextColumn Header="Startup" Binding="{Binding StartType}" Width="100"/>
+                <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="250"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <Border Grid.Row="3" Background="#181825" Padding="16,9">
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="btnAdminStartService" Content="▶  Start Selected Service" Style="{StaticResource BtnGreen}" Margin="0,0,6,0"/>
+                <Button x:Name="btnAdminRestartService" Content="↺  Restart Selected Service" Style="{StaticResource BtnYellow}" Margin="0,0,6,0"/>
+                <TextBlock Text="Only Print Spooler, TeamViewer, and AnyDesk services can be controlled. AnyDesk.exe is check-only."
+                           Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0" TextWrapping="Wrap"/>
               </StackPanel>
             </Border>
           </Grid>
@@ -1340,7 +1473,7 @@ function Save-Config {
           <StackPanel Margin="20,16,20,20">
             <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,14">
               <StackPanel>
-                <TextBlock Text="TIMERS" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                <TextBlock Text="SCHEDULES" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
                 <TextBlock Text="The device check interval is set on the Devices tab."
                            Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
                 <Grid>
@@ -1351,24 +1484,48 @@ function Save-Config {
                   <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
                   </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Service refresh (seconds)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
-                    <TextBox x:Name="txtRefreshEvery" Width="80" ToolTip="10 to 5400 seconds (90 minutes)"/>
-                    <TextBlock x:Name="txtRefreshHint" Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                  </StackPanel>
-                  <TextBlock Grid.Row="1" Text="Database version + SQL tab" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <TextBlock Grid.Row="1" Grid.Column="1" Text="Every 24 hours, at startup, and when you click Refresh" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <TextBlock Grid.Row="2" Text="History logs" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <TextBlock Grid.Row="2" Grid.Column="1" Text="Kept for 3 days" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="0" Text="Database version + SQL tab" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="0" Grid.Column="1" Text="Every 24 hours, at startup, and when you click Refresh" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="1" Text="History logs" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                  <TextBlock Grid.Row="1" Grid.Column="1" Text="Kept for 3 days" Foreground="#6C7086" VerticalAlignment="Center" Margin="0,0,0,10"/>
                 </Grid>
-                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                  <Button x:Name="btnTimersSave" Content="Save Timers" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
-                  <TextBlock x:Name="txtTimersStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="6,0,0,0"/>
-                </StackPanel>
               </StackPanel>
             </Border>
+                        <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock Text="SQL LOG MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                <TextBlock Text="The backup directory is on the SQL Server host. The dashboard writes ECS7_Log.trn inside it; the shrink target is in MB."
+                                                     Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="210"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="Logical log file name" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlLogicalLogName" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="SQL logical file name, for example ECS7_log or ECS7_Seabrook_Log"/>
+                                    <TextBlock Grid.Row="1" Text="Shrink target (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlShrinkTarget" Grid.Row="1" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
+                                    <TextBlock Grid.Row="2" Text="File growth increment (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlGrowthMb" Grid.Row="2" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
+                                    <TextBlock Grid.Row="3" Text="Backup directory (SQL Server)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                    <TextBox x:Name="txtSqlBackupDirectory" Grid.Row="3" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="Absolute drive path or UNC directory on the SQL Server host"/>
+                                    <TextBlock Grid.Row="4" Text="Maximum full backup age (minutes)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10" TextWrapping="Wrap"/>
+                                    <TextBox x:Name="txtSqlFullBackupAge" Grid.Row="4" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="A full backup must have finished within this many minutes. 5 to 1440."/>
+                                </Grid>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <Button x:Name="btnSqlMaintenanceSave" Content="Save Log Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
+                                    <TextBlock x:Name="txtSqlMaintenanceSettingsStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
             <Border Background="#313244" CornerRadius="8" Padding="18">
               <StackPanel>
                 <TextBlock Text="EMAIL ALERTS (SMTP)" Foreground="#CBA6F7" FontSize="11"
@@ -1467,37 +1624,6 @@ function Save-Config {
             </Border>
             <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,14,0,0">
               <StackPanel>
-                <TextBlock Text="SQL MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                <TextBlock Text="Log reduction only ever shrinks the transaction log file - it never changes the data file or the recovery model."
-                           Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="300"/>
-                    <ColumnDefinition Width="*"/>
-                  </Grid.ColumnDefinitions>
-                  <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                  </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Shrink the log down to (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
-                    <TextBox x:Name="txtSetShrinkTarget" Width="80"/>
-                    <TextBlock Text="What the log shrinks to - it cannot go below the log actually in use." Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                  </StackPanel>
-                  <TextBlock Grid.Row="1" Text="Only shrink if a FULL backup is at most (minutes) old" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
-                    <TextBox x:Name="txtSetShrinkGuard" Width="80"/>
-                    <TextBlock Text="No full backup this fresh = Shrink Log stays blocked. 5 to 1440." Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                  </StackPanel>
-                </Grid>
-                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                  <Button x:Name="btnMaintSave" Content="Save Maintenance Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
-                  <TextBlock x:Name="txtMaintStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="6,0,0,0"/>
-                </StackPanel>
-              </StackPanel>
-            </Border>
-            <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,14,0,0">
-              <StackPanel>
                 <TextBlock Text="APP UPDATES (GITHUB)" Foreground="#CBA6F7" FontSize="11"
                            FontWeight="SemiBold" Margin="0,0,0,4"/>
                 <TextBlock x:Name="txtUpdVersion" Foreground="#CDD6F4" FontSize="13" Margin="0,0,0,4"/>
@@ -1566,7 +1692,7 @@ function Save-Config {
     </Border>
   </Grid>
 </Window>
-'@
+"@
 # ------------------------------------------------------------
 # LOAD XAML + GET CONTROLS
 # ------------------------------------------------------------
@@ -1574,7 +1700,6 @@ $reader = New-Object System.Xml.XmlNodeReader $XAML
 try   { $window = [Windows.Markup.XamlReader]::Load($reader) }
 catch { Write-Error "XAML load failed: $_"; exit 1 }
 function Get-Ctrl($n) { $window.FindName($n) }
-$txtCountdown     = Get-Ctrl 'txtCountdown'
 $adminBadge       = Get-Ctrl 'adminBadge'
 $nonAdminBadge    = Get-Ctrl 'nonAdminBadge'
 $btnRefresh       = Get-Ctrl 'btnRefresh'
@@ -1589,6 +1714,15 @@ $btnStopAll       = Get-Ctrl 'btnStopAll'
 $btnRestartAll    = Get-Ctrl 'btnRestartAll'
 $ServicePanel     = Get-Ctrl 'ServicePanel'
 $HistoryGrid      = Get-Ctrl 'HistoryGrid'
+$EventsGrid       = Get-Ctrl 'EventsGrid'
+$ServiceSubTabs   = Get-Ctrl 'ServiceSubTabs'
+$tabEvents        = Get-Ctrl 'tabEvents'
+$chkEventInformation = Get-Ctrl 'chkEventInformation'
+$chkEventWarning = Get-Ctrl 'chkEventWarning'
+$chkEventError = Get-Ctrl 'chkEventError'
+$chkEventCritical = Get-Ctrl 'chkEventCritical'
+$btnRefreshEvents = Get-Ctrl 'btnRefreshEvents'
+$btnClearEvents   = Get-Ctrl 'btnClearEvents'
 $statRunning      = Get-Ctrl 'statRunning'
 $statStopped      = Get-Ctrl 'statStopped'
 $statOther        = Get-Ctrl 'statOther'
@@ -1657,12 +1791,34 @@ $btnRemStart      = Get-Ctrl 'btnRemStart'
 $btnRemStop       = Get-Ctrl 'btnRemStop'
 $btnRemRestart    = Get-Ctrl 'btnRemRestart'
 $btnRemStack      = Get-Ctrl 'btnRemStack'
+$pnlRemoteAdmin   = Get-Ctrl 'pnlRemoteAdmin'
+$txtAdminHost     = Get-Ctrl 'txtAdminHost'
+$cmbAdminTransport = Get-Ctrl 'cmbAdminTransport'
+$txtAdminStatus   = Get-Ctrl 'txtAdminStatus'
+$btnAdminCheck    = Get-Ctrl 'btnAdminCheck'
+$btnAdminEnableRdp = Get-Ctrl 'btnAdminEnableRdp'
+$btnAdminEnableWinRm = Get-Ctrl 'btnAdminEnableWinRm'
+$btnAdminLoadServices = Get-Ctrl 'btnAdminLoadServices'
+$btnAdminClose    = Get-Ctrl 'btnAdminClose'
+$dgAdminServices  = Get-Ctrl 'dgAdminServices'
+$btnAdminStartService = Get-Ctrl 'btnAdminStartService'
+$btnAdminRestartService = Get-Ctrl 'btnAdminRestartService'
 $txtSnapKeep      = Get-Ctrl 'txtSnapKeep'
 $txtSnapDays      = Get-Ctrl 'txtSnapDays'
 $txtSqlServer     = Get-Ctrl 'txtSqlServer'
 $btnSnapSave      = Get-Ctrl 'btnSnapSave'
 $btnSnapOpen      = Get-Ctrl 'btnSnapOpen'
 $txtSnapStatus    = Get-Ctrl 'txtSnapStatus'
+$txtSqlShrinkTarget = Get-Ctrl 'txtSqlShrinkTarget'
+$txtSqlLogicalLogName = Get-Ctrl 'txtSqlLogicalLogName'
+$txtSqlGrowthMb = Get-Ctrl 'txtSqlGrowthMb'
+$txtSqlBackupDirectory = Get-Ctrl 'txtSqlBackupDirectory'
+$txtSqlFullBackupAge = Get-Ctrl 'txtSqlFullBackupAge'
+$txtSqlMaintenancePlan = Get-Ctrl 'txtSqlMaintenancePlan'
+$btnSqlMaintenance = Get-Ctrl 'btnSqlMaintenance'
+$txtSqlMaintenanceStatus = Get-Ctrl 'txtSqlMaintenanceStatus'
+$btnSqlMaintenanceSave = Get-Ctrl 'btnSqlMaintenanceSave'
+$txtSqlMaintenanceSettingsStatus = Get-Ctrl 'txtSqlMaintenanceSettingsStatus'
 $dbBadge          = Get-Ctrl 'dbBadge'
 $tabSoftware      = Get-Ctrl 'tabSoftware'
 $txtSwStation     = Get-Ctrl 'txtSwStation'
@@ -1699,6 +1855,14 @@ $btnSsShowAll     = Get-Ctrl 'btnSsShowAll'
 $txtDbVer         = Get-Ctrl 'txtDbVer'
 $MainTabs         = Get-Ctrl 'MainTabs'
 $tabSql           = Get-Ctrl 'tabSql'
+$tabLogs          = Get-Ctrl 'tabLogs'
+$txtLogStatus     = Get-Ctrl 'txtLogStatus'
+$txtLogSearch     = Get-Ctrl 'txtLogSearch'
+$cmbLogSeverity   = Get-Ctrl 'cmbLogSeverity'
+$cmbLogTime       = Get-Ctrl 'cmbLogTime'
+$btnLogFind       = Get-Ctrl 'btnLogFind'
+$btnLogRefresh    = Get-Ctrl 'btnLogRefresh'
+$LogProgramTabs   = Get-Ctrl 'LogProgramTabs'
 $txtSqlStatus     = Get-Ctrl 'txtSqlStatus'
 $btnSqlCopy       = Get-Ctrl 'btnSqlCopy'
 $btnSqlRefresh    = Get-Ctrl 'btnSqlRefresh'
@@ -1731,10 +1895,6 @@ $txtSqlFiles      = Get-Ctrl 'txtSqlFiles'
 $txtSqlEdition    = Get-Ctrl 'txtSqlEdition'
 $txtSqlBuild      = Get-Ctrl 'txtSqlBuild'
 $txtSqlUptime     = Get-Ctrl 'txtSqlUptime'
-$txtRefreshEvery  = Get-Ctrl 'txtRefreshEvery'
-$txtRefreshHint   = Get-Ctrl 'txtRefreshHint'
-$btnTimersSave    = Get-Ctrl 'btnTimersSave'
-$txtTimersStatus  = Get-Ctrl 'txtTimersStatus'
 $txtDevEvery      = Get-Ctrl 'txtDevEvery'
 $tabReaders       = Get-Ctrl 'tabReaders'
 $txtRdStatus      = Get-Ctrl 'txtRdStatus'
@@ -1772,18 +1932,8 @@ $btnApSave        = Get-Ctrl 'btnApSave'
 $dgAps            = Get-Ctrl 'dgAps'
 $btnApPingWin     = Get-Ctrl 'btnApPingWin'
 $btnApForget      = Get-Ctrl 'btnApForget'
-# v2.23 controls: SQL log reduction
-$txtShrinkNow     = Get-Ctrl 'txtShrinkNow'
-$txtShrinkTarget  = Get-Ctrl 'txtShrinkTarget'
-$txtShrinkGuard   = Get-Ctrl 'txtShrinkGuard'
-$txtShrinkStatus  = Get-Ctrl 'txtShrinkStatus'
-$btnShrinkLog     = Get-Ctrl 'btnShrinkLog'
-$btnShrinkRefresh = Get-Ctrl 'btnShrinkRefresh'
-# v2.23 controls: Settings tab maintenance
-$txtSetShrinkTarget = Get-Ctrl 'txtSetShrinkTarget'
-$txtSetShrinkGuard  = Get-Ctrl 'txtSetShrinkGuard'
-$btnMaintSave       = Get-Ctrl 'btnMaintSave'
-$txtMaintStatus     = Get-Ctrl 'txtMaintStatus'
+#Dev Buttons
+$btnDevRemoteAdmin = New-Object System.Windows.Controls.Button   # triggered from the expanded device row
 
 # ------------------------------------------------------------
 # COLOR HELPERS + STATUS/TRAY COLOR
@@ -1868,6 +2018,93 @@ function Get-SafeServiceStatus([string]$Name) {
         }
     }
 }
+function Get-ServiceResourceMetrics {
+    $metrics = @{}
+    foreach ($def in $script:ServiceDefs) {
+        $metrics[$def.Name] = [PSCustomObject]@{
+            CpuPercent = $null
+            MemoryMB   = $null
+            ReadMBps   = $null
+            WriteMBps  = $null
+            ProcessId  = 0
+            Note       = 'Service is not running'
+        }
+    }
+
+    try {
+        $serviceProcesses = @(Get-CimInstance -ClassName Win32_Service |
+            Where-Object { $_.Name -in $script:ServiceDefs.Name -and $_.State -eq 'Running' -and $_.ProcessId -gt 0 })
+        $processIds = @($serviceProcesses.ProcessId | Sort-Object -Unique)
+        if ($processIds.Count -eq 0) {
+            $script:PreviousProcessSamples = @{}
+            return $metrics
+        }
+
+        $filter = ($processIds | ForEach-Object { "ProcessId=$_" }) -join ' OR '
+        $now = Get-Date
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter $filter)
+        $nextSamples = @{}
+        foreach ($process in $processes) {
+            $processId = [int]$process.ProcessId
+            $nextSamples[$processId] = [PSCustomObject]@{
+                Time               = $now
+                CpuTime100ns       = [double]$process.KernelModeTime + [double]$process.UserModeTime
+                ReadTransferCount  = [double]$process.ReadTransferCount
+                WriteTransferCount = [double]$process.WriteTransferCount
+                MemoryMB           = [Math]::Round(([double]$process.WorkingSetSize / 1MB), 1)
+                CreationDate       = [string]$process.CreationDate
+            }
+        }
+
+        $processorCount = [Math]::Max(1, [Environment]::ProcessorCount)
+        foreach ($service in $serviceProcesses) {
+            $processId = [int]$service.ProcessId
+            $processSample = $nextSamples[$processId]
+            if (-not $processSample) {
+                $metrics[$service.Name] = [PSCustomObject]@{
+                    CpuPercent = $null; MemoryMB = $null; ReadMBps = $null; WriteMBps = $null
+                    ProcessId = $processId; Note = 'Process metrics are unavailable'
+                }
+                continue
+            }
+
+            $previous = $script:PreviousProcessSamples[$processId]
+            $cpuPercent = $null
+            $readMBps = $null
+            $writeMBps = $null
+            if ($previous) {
+                $elapsed = ($now - $previous.Time).TotalSeconds
+                if ($elapsed -gt 0 -and
+                    $processSample.CreationDate -eq $previous.CreationDate -and
+                    $processSample.CpuTime100ns -ge $previous.CpuTime100ns -and
+                    $processSample.ReadTransferCount -ge $previous.ReadTransferCount -and
+                    $processSample.WriteTransferCount -ge $previous.WriteTransferCount) {
+                    $cpuPercent = [Math]::Round((($processSample.CpuTime100ns - $previous.CpuTime100ns) / 10000000 / $elapsed / $processorCount) * 100, 1)
+                    $readMBps = [Math]::Round((($processSample.ReadTransferCount - $previous.ReadTransferCount) / 1MB / $elapsed), 2)
+                    $writeMBps = [Math]::Round((($processSample.WriteTransferCount - $previous.WriteTransferCount) / 1MB / $elapsed), 2)
+                }
+            }
+            $metrics[$service.Name] = [PSCustomObject]@{
+                CpuPercent = $cpuPercent
+                MemoryMB   = $processSample.MemoryMB
+                ReadMBps   = $readMBps
+                WriteMBps  = $writeMBps
+                ProcessId  = $processId
+                Note       = if ($null -eq $cpuPercent) { 'Rates available after the next refresh' } else { '' }
+            }
+        }
+        $script:PreviousProcessSamples = $nextSamples
+    } catch {
+        $errorMessage = $_.Exception.Message
+        foreach ($def in $script:ServiceDefs) {
+            $metrics[$def.Name] = [PSCustomObject]@{
+                CpuPercent = $null; MemoryMB = $null; ReadMBps = $null; WriteMBps = $null
+                ProcessId = 0; Note = "Metrics unavailable: $errorMessage"
+            }
+        }
+    }
+    return $metrics
+}
 function Start-ServiceSafe([string]$name) {
     try {
         $svc = Get-Service -Name $name -ErrorAction Stop
@@ -1916,8 +2153,8 @@ function Build-ServiceRows {
         $card.Padding      = New-Object Windows.Thickness(16, 12, 16, 12)
         $card.Tag          = $def.Group
         $grid = New-Object Windows.Controls.Grid
-        # Columns: Dot | Info | Status | Restart | Toggle
-        foreach ($w in @('Auto', '*', 'Auto', 'Auto', 'Auto')) {
+        # Columns: Dot | Info | Metrics | Status | Restart | Toggle
+        foreach ($w in @('Auto', '*', 'Auto', 'Auto', 'Auto', 'Auto')) {
             $cd = New-Object Windows.Controls.ColumnDefinition
             $cd.Width = if ($w -eq '*') {
                 New-Object Windows.GridLength(1, [Windows.GridUnitType]::Star)
@@ -1962,6 +2199,14 @@ function Build-ServiceRows {
         $svcTb.Margin     = New-Object Windows.Thickness(0,2,0,0)
         $infoStack.Children.Add($nameRow) | Out-Null
         $infoStack.Children.Add($svcTb)   | Out-Null
+        $metricsTb = New-Object Windows.Controls.TextBlock
+        $metricsTb.Text = 'CPU --  MEM --  Disk R/W --'
+        $metricsTb.FontSize = 11
+        $metricsTb.Foreground = ColorBrush '#A6ADC8'
+        $metricsTb.VerticalAlignment = 'Center'
+        $metricsTb.Margin = New-Object Windows.Thickness(12,0,16,0)
+        $metricsTb.ToolTip = 'Process-level metrics: CPU is a share of total system capacity, memory is working set, and disk is read/write I/O rate. Services sharing a process show the same values. Rates need two refresh samples.'
+        [Windows.Controls.Grid]::SetColumn($metricsTb, 2)
         # Status text
         $statusTb = New-Object Windows.Controls.TextBlock
         $statusTb.FontSize   = 12
@@ -1969,7 +2214,7 @@ function Build-ServiceRows {
         $statusTb.VerticalAlignment = 'Center'
         $statusTb.HorizontalAlignment = 'Right'
         $statusTb.Margin = New-Object Windows.Thickness(0,0,16,0)
-        [Windows.Controls.Grid]::SetColumn($statusTb, 2)
+        [Windows.Controls.Grid]::SetColumn($statusTb, 3)
         # Restart button (this service only)
         $btnRst = New-Object Windows.Controls.Button
         $btnRst.Style     = $window.FindResource('BtnYellow')
@@ -1980,7 +2225,7 @@ function Build-ServiceRows {
         $btnRst.ToolTip   = "Restart $($def.Display) only"
         $btnRst.IsEnabled = $script:IsAdmin
         if ($def['MonitorOnly']) { $btnRst.Visibility = [System.Windows.Visibility]::Collapsed }
-        [Windows.Controls.Grid]::SetColumn($btnRst, 3)
+        [Windows.Controls.Grid]::SetColumn($btnRst, 4)
         $btnRst.Add_Click({
             $n = [string]$this.Tag
             $d = $script:ServiceRows[$n].Def
@@ -2004,13 +2249,13 @@ function Build-ServiceRows {
         $chk.Tag       = $def.Name
         $chk.IsChecked = -not $script:DisabledServices.ContainsKey($def.Name)
         $chk.ToolTip   = 'On = monitored and included in Start/Stop/Restart All'
-        [Windows.Controls.Grid]::SetColumn($chk, 4)
+        [Windows.Controls.Grid]::SetColumn($chk, 5)
         $chk.Add_Click({
             $n = [string]$this.Tag
             $d = $script:ServiceRows[$n].Def
             if ($this.IsChecked) { $script:DisabledServices.Remove($n); $label = 'Monitoring On' }
             else                 { $script:DisabledServices[$n] = $true; $label = 'Monitoring Off' }
-            Save-Config -RefreshSeconds ($script:RefreshSecs)
+            Save-Config
             Add-HistoryEntry -ServiceName $d.Display -Group $d.Group -OldStatus '' -NewStatus $label -Note 'Toggled by user'
             Update-ServiceRow $n
             Refresh-Summary
@@ -2018,6 +2263,7 @@ function Build-ServiceRows {
         # Add elements to grid
         $grid.Children.Add($dot)       | Out-Null
         $grid.Children.Add($infoStack) | Out-Null
+        $grid.Children.Add($metricsTb) | Out-Null
         $grid.Children.Add($statusTb)  | Out-Null
         $grid.Children.Add($btnRst)    | Out-Null
         $grid.Children.Add($chk)       | Out-Null
@@ -2027,6 +2273,7 @@ function Build-ServiceRows {
         $script:ServiceRows[$def.Name] = [PSCustomObject]@{
             Card     = $card
             Dot      = $dot
+            MetricsTb = $metricsTb
             StatusTb = $statusTb
             NoteTb   = $svcTb
             Toggle   = $chk
@@ -2039,6 +2286,17 @@ function Build-ServiceRows {
 # HISTORY + SUMMARY
 # ------------------------------------------------------------
 $HistoryGrid.ItemsSource = $script:HistoryList
+$EventsGrid.ItemsSource = $script:EventList
+function Update-EventsGridFilter {
+    $visibleLevels = @()
+    if ([bool]$chkEventInformation.IsChecked) { $visibleLevels += 'Information' }
+    if ([bool]$chkEventWarning.IsChecked) { $visibleLevels += 'Warning' }
+    if ([bool]$chkEventError.IsChecked) { $visibleLevels += 'Error' }
+    if ([bool]$chkEventCritical.IsChecked) { $visibleLevels += 'Critical' }
+    $EventsGrid.ItemsSource = @($script:EventList | Where-Object {
+        $_.Level -in $visibleLevels
+    })
+}
 function Add-HistoryEntry {
     param(
         [string]$ServiceName,
@@ -2064,6 +2322,130 @@ function Add-HistoryEntry {
         $entry | Export-Csv -Path $csv -Append -NoTypeInformation -Encoding UTF8
     } catch {}
 }
+function Load-History {
+    $script:HistoryList.Clear()
+    if (-not (Test-Path -LiteralPath $script:HistoryDir)) {
+        $statEvents.Text = '0'
+        return
+    }
+
+    $entries = New-Object 'System.Collections.Generic.List[PSObject]'
+    $files = @(Get-ChildItem -LiteralPath $script:HistoryDir -Filter 'History_*.csv' -File -ErrorAction SilentlyContinue)
+    foreach ($file in $files) {
+        try {
+            foreach ($row in @(Import-Csv -LiteralPath $file.FullName -ErrorAction Stop)) {
+                $entryTime = [datetime]::MinValue
+                $validTime = [datetime]::TryParseExact(
+                    [string]$row.Time,
+                    'yyyy-MM-dd HH:mm:ss',
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::None,
+                    [ref]$entryTime
+                )
+                if (-not $validTime) { continue }
+                $entries.Add([PSCustomObject]@{
+                    SortTime    = $entryTime
+                    Time        = [string]$row.Time
+                    ServiceName = [string]$row.ServiceName
+                    Group       = [string]$row.Group
+                    OldStatus   = [string]$row.OldStatus
+                    NewStatus   = [string]$row.NewStatus
+                    Note        = [string]$row.Note
+                })
+            }
+        } catch {
+            $statusBar.Text = "Could not load history from $($file.Name): $($_.Exception.Message)"
+        }
+    }
+
+    foreach ($entry in @($entries | Sort-Object SortTime -Descending)) {
+        $script:HistoryList.Add([PSCustomObject]@{
+            Time        = $entry.Time
+            ServiceName = $entry.ServiceName
+            Group       = $entry.Group
+            OldStatus   = $entry.OldStatus
+            NewStatus   = $entry.NewStatus
+            Note        = $entry.Note
+        })
+    }
+    $statEvents.Text = [string]$script:HistoryList.Count
+}
+function Get-ServiceEvents {
+    param([int]$Hours = 24, [int]$MaxEvents = 200)
+    try {
+        $serviceNames = foreach ($service in $script:ServiceDefs) {
+            $installedService = Get-Service -Name $service.Name -ErrorAction SilentlyContinue
+            $installedDisplay = if ($installedService) { $installedService.DisplayName } else { $null }
+            [PSCustomObject]@{
+                Display = $service.Display
+                Names   = @($service.Name, $service.Display, $installedDisplay) | Where-Object { $_ }
+            }
+        }
+        Get-WinEvent -FilterHashtable @{
+            LogName      = 'System'
+            ProviderName = 'Service Control Manager'
+            StartTime    = (Get-Date).AddHours(-$Hours)
+        } -ErrorAction Stop | ForEach-Object {
+            $eventRecord = $_
+            $matchedService = $null
+            $eventService = if ($eventRecord.Properties.Count -gt 0) { [string]$eventRecord.Properties[0].Value } else { '' }
+            foreach ($service in $serviceNames) {
+                if (@($service.Names | Where-Object {
+                    $eventService -eq $_ -or $eventRecord.Message -match [regex]::Escape($_)
+                }).Count -gt 0) {
+                    $matchedService = $service.Display
+                    break
+                }
+            }
+            $level = switch ($eventRecord.Level) {
+                1 { 'Critical' }
+                2 { 'Error' }
+                3 { 'Warning' }
+                4 { 'Information' }
+                default { $eventRecord.LevelDisplayName }
+            }
+            if ($matchedService -and $level -in @('Information', 'Warning', 'Error', 'Critical')) {
+                [PSCustomObject]@{
+                    Time        = $eventRecord.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                    Level       = $level
+                    EventId     = $eventRecord.Id
+                    Source      = $eventRecord.ProviderName
+                    Service     = $matchedService
+                    Message     = ($eventRecord.Message -replace "`r", ' ' -replace "`n", ' ')
+                    FullMessage = $eventRecord.Message
+                }
+            }
+        } | Select-Object -First $MaxEvents
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') { return @() }
+        throw
+    }
+}
+function Refresh-EventsGrid {
+    $script:EventList.Clear()
+    foreach ($event in @(Get-ServiceEvents)) { $script:EventList.Add($event) }
+    Update-EventsGridFilter
+}
+foreach ($levelFilter in @($chkEventInformation, $chkEventWarning, $chkEventError, $chkEventCritical)) {
+    $levelFilter.Add_Click({ Update-EventsGridFilter })
+}
+function Invoke-EventsRefresh {
+    try {
+        Refresh-EventsGrid
+        $statusBar.Text = "Event list refreshed: $($script:EventList.Count) matching events in the last 24 hours."
+    } catch {
+        $statusBar.Text = "Could not refresh event list: $($_.Exception.Message)"
+    }
+}
+$ServiceSubTabs.Add_SelectionChanged({
+    if ($_.OriginalSource -eq $ServiceSubTabs -and $tabEvents.IsSelected) { Invoke-EventsRefresh }
+})
+$btnRefreshEvents.Add_Click({ Invoke-EventsRefresh })
+$btnClearEvents.Add_Click({
+    $script:EventList.Clear()
+    Update-EventsGridFilter
+    $statusBar.Text = 'Event view cleared.'
+})
 function Refresh-Summary {
     $running = 0
     $stopped = 0
@@ -2218,7 +2600,7 @@ function Register-OfflineEvent {
 # DEVICES (RDP / IP CHECKER)
 # ------------------------------------------------------------
 $dgDevices.ItemsSource = $script:Devices
-function Save-AllConfig { Save-Config -RefreshSeconds ($script:RefreshSecs) }
+function Save-AllConfig { Save-Config }
 function New-DeviceObject([string]$Name, [string]$LastIP, [string]$LastSeen) {
     [PSCustomObject]@{
         Name        = $Name
@@ -2755,6 +3137,23 @@ $btnDscIgnore.Add_Click({
 # ------------------------------------------------------------
 # UPDATE SERVICE ROWS
 # ------------------------------------------------------------
+function Update-ServiceResourceMetricDisplay {
+    param($Row, $Metrics)
+    if (-not $Metrics) {
+        $Row.MetricsTb.Text = 'CPU --  MEM --  Disk R/W --'
+        $Row.MetricsTb.ToolTip = 'Process metrics are not available yet.'
+        return
+    }
+    $cpuText = if ($null -eq $Metrics.CpuPercent) { '--' } else { '{0:N1}%' -f $Metrics.CpuPercent }
+    $memoryText = if ($null -eq $Metrics.MemoryMB) { '--' } else { '{0:N1} MB' -f $Metrics.MemoryMB }
+    $readText = if ($null -eq $Metrics.ReadMBps) { '--' } else { '{0:N2}' -f $Metrics.ReadMBps }
+    $writeText = if ($null -eq $Metrics.WriteMBps) { '--' } else { '{0:N2}' -f $Metrics.WriteMBps }
+    $Row.MetricsTb.Text = "CPU $cpuText  MEM $memoryText  Disk R/W $readText/$writeText MB/s"
+    $tooltip = 'Process-level metrics: CPU is a share of total system capacity, memory is working set, and disk is read/write I/O rate. Services sharing a process show the same values.'
+    if ($Metrics.Note) { $tooltip += "`r`n$($Metrics.Note)" }
+    if ($Metrics.ProcessId -gt 0) { $tooltip += "`r`nProcess ID: $($Metrics.ProcessId)" }
+    $Row.MetricsTb.ToolTip = $tooltip
+}
 function Update-ServiceRow {
     param([string]$Name)
     $row = $script:ServiceRows[$Name]
@@ -2765,6 +3164,7 @@ function Update-ServiceRow {
         $st = Get-SafeServiceStatus $def.Name
         $script:ServiceCache[$def.Name] = $st
     }
+    Update-ServiceResourceMetricDisplay $row $script:ServiceResourceMetrics[$def.Name]
     $wasAuto = $script:AutoOff.ContainsKey($def.Name)
 
     # Not installed on this machine: switch the toggle off automatically and say why
@@ -2822,11 +3222,13 @@ function Update-ServiceRow {
 }
 function Update-AllServices {
     $script:ServiceCache = @{}
+    $script:ServiceResourceMetrics = Get-ServiceResourceMetrics
     foreach ($def in $script:ServiceDefs) {
         $script:ServiceCache[$def.Name] = Get-SafeServiceStatus $def.Name
         Update-ServiceRow $def.Name
     }
     Refresh-Summary
+    $script:NextServiceRefresh = [datetime]::Now.AddSeconds(3)
 }
 # ------------------------------------------------------------
 # FILTERING
@@ -2848,11 +3250,6 @@ function Apply-Filter {
 # CONFIG + SLIDER INITIALIZATION
 # ------------------------------------------------------------
 $config = Load-Config
-$secs = 30
-$rp = $config.PSObject.Properties['RefreshSeconds']
-if ($rp) { $secs = [int]$rp.Value }
-if ($secs -lt 10) { $secs = 10 }
-if ($secs -gt 5400) { $secs = 5400 }
 $dp = $config.PSObject.Properties['DisabledServices']
 if ($dp -and $dp.Value) {
     foreach ($n in @($dp.Value)) { $script:DisabledServices[[string]$n] = $true }
@@ -2890,6 +3287,37 @@ if ($ig -and $ig.Value) {
 }
 $sq = $config.PSObject.Properties['SqlServer']
 if ($sq -and $sq.Value) { $script:GuruSqlServer = [string]$sq.Value }
+$lm = $config.PSObject.Properties['SqlMaintenance']
+if ($lm -and $lm.Value) {
+    $logNameSetting = $lm.Value.PSObject.Properties['LogicalLogName']
+    if ($logNameSetting) {
+        $logNameValue = ([string]$logNameSetting.Value).Trim()
+        if ($logNameValue.Length -ge 1 -and $logNameValue.Length -le 128 -and $logNameValue -notmatch '[\x00-\x1F]') {
+            $script:SqlMaintenanceConfig['LogicalLogName'] = $logNameValue
+        }
+    }
+    $targetSetting = $lm.Value.PSObject.Properties['ShrinkTargetMB']
+    if ($targetSetting) {
+        $targetValue = 0
+        if ([int]::TryParse([string]$targetSetting.Value, [ref]$targetValue) -and $targetValue -ge 1 -and $targetValue -le 10240) {
+            $script:SqlMaintenanceConfig['ShrinkTargetMB'] = $targetValue
+        }
+    }
+    $growthSetting = $lm.Value.PSObject.Properties['GrowthMB']
+    if ($growthSetting) {
+        $growthValue = 0
+        if ([int]::TryParse([string]$growthSetting.Value, [ref]$growthValue) -and $growthValue -ge 1 -and $growthValue -le 10240) {
+            $script:SqlMaintenanceConfig['GrowthMB'] = $growthValue
+        }
+    }
+    $directorySetting = $lm.Value.PSObject.Properties['BackupDirectory']
+    if ($directorySetting) {
+        $directoryValue = ([string]$directorySetting.Value).Trim()
+        if ($directoryValue -match '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)') {
+            $script:SqlMaintenanceConfig['BackupDirectory'] = $directoryValue.TrimEnd('\')
+        }
+    }
+}
 $sn = $config.PSObject.Properties['Snapshot']
 if ($sn -and $sn.Value) {
     foreach ($k in @($script:SnapshotConfig.Keys)) {
@@ -2961,9 +3389,6 @@ $script:ApCountdown = [int]$script:ApConfig['PingSecs']
 $ds = $config.PSObject.Properties['DeviceSeconds']
 if ($ds -and $ds.Value) { $v = [int]$ds.Value; if ($v -ge 30 -and $v -le 3600) { $script:DeviceSecs = $v } }
 $script:DeviceCountdown = $script:DeviceSecs
-$script:RefreshSecs   = $secs
-$script:CountdownSecs = $secs
-$txtCountdown.Text    = Format-Countdown $secs
 # ------------------------------------------------------------
 # ADMIN BADGES
 # ------------------------------------------------------------
@@ -2996,7 +3421,6 @@ $miShow.Add_Click({
     $window.Activate()
 })
 $miRefresh.Add_Click({
-    $script:CountdownSecs = $script:RefreshSecs
     Set-StatusColor 'Updating'
     Set-TrayIconColor 'Updating'
     $statusBar.Text = "Tray refresh..."
@@ -3023,7 +3447,6 @@ $window.Add_Closing({
 # BUTTON WIRES
 # ------------------------------------------------------------
 $btnRefresh.Add_Click({
-    $script:CountdownSecs = $script:RefreshSecs
     Set-StatusColor 'Updating'
     Set-TrayIconColor 'Updating'
     $statusBar.Text = "Manual refresh..."
@@ -3033,8 +3456,22 @@ $btnRefresh.Add_Click({
     if ($script:LastReaderLoad -ne [datetime]::MinValue) { Start-ReaderLoad }
 })
 $btnClearHistory.Add_Click({
+    $answer = [System.Windows.MessageBox]::Show(
+        'Clear the history shown here and delete the saved history files?',
+        'Clear History', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    try {
+        if (Test-Path -LiteralPath $script:HistoryDir) {
+            Get-ChildItem -LiteralPath $script:HistoryDir -Filter 'History_*.csv' -File -ErrorAction Stop |
+                Remove-Item -Force -ErrorAction Stop
+        }
+    } catch {
+        $statusBar.Text = "Could not clear saved history: $($_.Exception.Message)"
+        return
+    }
     $script:HistoryList.Clear()
     $statEvents.Text = '0'
+    $statusBar.Text = 'History cleared.'
 })
 $btnFilterAll.Add_Click({ Apply-Filter 'All' })
 $btnFilterApi.Add_Click({ Apply-Filter 'API' })
@@ -3120,8 +3557,15 @@ function Apply-SmtpUi {
     $c['CooldownMinutes'] = $cool
     if (-not $c['Username']) {
         $c['PasswordEnc'] = ''
-    } elseif ($pwdSmtp.Password) {
-        $c['PasswordEnc'] = (ConvertTo-SecureString $pwdSmtp.Password -AsPlainText -Force | ConvertFrom-SecureString)
+    } else {
+        $securePassword = $pwdSmtp.SecurePassword
+        try {
+            if ($securePassword.Length -gt 0) {
+                $c['PasswordEnc'] = ConvertFrom-SecureString $securePassword
+            }
+        } finally {
+            $securePassword.Dispose()
+        }
     }
     $pwdSmtp.Clear()
     return $null
@@ -3129,7 +3573,7 @@ function Apply-SmtpUi {
 $btnSmtpSave.Add_Click({
     $err = Apply-SmtpUi
     if ($err) { Set-SmtpStatus $err '#F38BA8'; return }
-    Save-Config -RefreshSeconds ($script:RefreshSecs)
+    Save-Config
     Update-SmtpPwdHint
     Set-SmtpStatus ("Saved at {0}" -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
 })
@@ -3141,7 +3585,7 @@ $btnSmtpTest.Add_Click({
         Set-SmtpStatus 'Fill in Server, From and Send alerts to first.' '#F38BA8'
         return
     }
-    Save-Config -RefreshSeconds ($script:RefreshSecs)
+    Save-Config
     Update-SmtpPwdHint
     Set-SmtpStatus 'Sending test email...' '#89B4FA'
     $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
@@ -3155,7 +3599,7 @@ Initialize-SmtpUi
 # SETTINGS TAB: GITHUB UPDATES
 # ------------------------------------------------------------
 # Background job. Reads version.json from the repo; if it is newer (and Download is on) it also fetches the script,
-# checks its hash, checks that it parses as PowerShell and that it declares the version version.json promised.
+# checks that it parses as PowerShell and that it declares the version version.json promised.
 $script:UpdateScript = {
     param($repo, $branch, $token, $currentVersion, $download)
     $out = [ordered]@{ Ok = $false; Error = ''; Latest = ''; Notes = ''; Newer = $false; File = ''; Content = '' }
@@ -3181,10 +3625,6 @@ $script:UpdateScript = {
             $file = [string]$vj.file
             if ($file -notmatch '^[A-Za-z0-9._-]+\.ps1$') { throw 'version.json does not name a valid .ps1 file.' }
             $content = Get-GitHubText $repo $branch $file $token
-            $norm = $content -replace "`r`n", "`n"
-            $sha  = [System.Security.Cryptography.SHA256]::Create()
-            $hash = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($norm)) | ForEach-Object { $_.ToString('x2') }) -join '')
-            if ($hash -ne ([string]$vj.sha256).ToLower()) { throw 'The downloaded file does not match the hash in version.json, so the update was cancelled.' }
             $tokens = $null; $errs = $null
             [void][System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errs)
             if ($errs -and $errs.Count -gt 0) { throw 'The downloaded file is not valid PowerShell, so the update was cancelled.' }
@@ -3238,8 +3678,13 @@ function Apply-UpdateUi {
     $c['Branch']      = $branch
     $c['AutoCheck']   = [bool]$chkUpdAuto.IsChecked
     $c['AutoInstall'] = [bool]$chkUpdInstall.IsChecked
-    if ($pwdUpdToken.Password) {
-        $c['TokenEnc'] = (ConvertTo-SecureString $pwdUpdToken.Password -AsPlainText -Force | ConvertFrom-SecureString)
+    $secureToken = $pwdUpdToken.SecurePassword
+    try {
+        if ($secureToken.Length -gt 0) {
+            $c['TokenEnc'] = ConvertFrom-SecureString $secureToken
+        }
+    } finally {
+        $secureToken.Dispose()
     }
     $pwdUpdToken.Clear()
     return $null
@@ -3564,6 +4009,63 @@ function Initialize-SnapshotUi {
     $txtSnapDays.Text  = [string]$script:SnapshotConfig['MaxAgeDays']
     $txtSqlServer.Text = [string]$script:GuruSqlServer
 }
+function Update-SqlMaintenancePlan {
+    $directory = ([string]$script:SqlMaintenanceConfig['BackupDirectory']).TrimEnd('\')
+    $logName = [string]$script:SqlMaintenanceConfig['LogicalLogName']
+    $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
+    $growth = [int]$script:SqlMaintenanceConfig['GrowthMB']
+    $txtSqlMaintenancePlan.Text = "Backs up ECS7 to $directory\ECS7_Log.trn, shrinks $logName to $target MB, then sets $growth MB growth and a 10,240 MB maximum."
+}
+function Initialize-SqlMaintenanceUi {
+    $txtSqlLogicalLogName.Text = [string]$script:SqlMaintenanceConfig['LogicalLogName']
+    $txtSqlShrinkTarget.Text = [string]$script:SqlMaintenanceConfig['ShrinkTargetMB']
+    $txtSqlGrowthMb.Text = [string]$script:SqlMaintenanceConfig['GrowthMB']
+    $txtSqlBackupDirectory.Text = [string]$script:SqlMaintenanceConfig['BackupDirectory']
+    $txtSqlFullBackupAge.Text = [string]$script:ShrinkConfig['FullBackupMin']
+    Update-SqlMaintenancePlan
+}
+Initialize-SqlMaintenanceUi
+function Set-SqlMaintenanceSettingsStatus([string]$text, [string]$hex) {
+    $txtSqlMaintenanceSettingsStatus.Text = $text
+    $txtSqlMaintenanceSettingsStatus.Foreground = ColorBrush $hex
+}
+$btnSqlMaintenanceSave.Add_Click({
+    $logName = $txtSqlLogicalLogName.Text.Trim()
+    if (-not $logName -or $logName.Length -gt 128 -or $logName -match '[\x00-\x1F]') {
+        Set-SqlMaintenanceSettingsStatus 'Logical log file name must be 1 to 128 characters and contain no control characters.' '#F38BA8'
+        return
+    }
+    $target = 0
+    if (-not [int]::TryParse($txtSqlShrinkTarget.Text.Trim(), [ref]$target) -or $target -lt 1 -or $target -gt 10240) {
+        Set-SqlMaintenanceSettingsStatus 'Shrink target must be a whole number from 1 to 10240 MB.' '#F38BA8'
+        return
+    }
+    $growth = 0
+    if (-not [int]::TryParse($txtSqlGrowthMb.Text.Trim(), [ref]$growth) -or $growth -lt 1 -or $growth -gt 10240) {
+        Set-SqlMaintenanceSettingsStatus 'File growth must be a whole number from 1 to 10240 MB.' '#F38BA8'
+        return
+    }
+    $directory = $txtSqlBackupDirectory.Text.Trim().TrimEnd('\')
+    $isDrivePath = $directory -match '^[A-Za-z]:\\'
+    $isUncPath = $directory -match '^\\\\[^\\]+\\[^\\]+'
+    if (-not ($isDrivePath -or $isUncPath) -or $directory -match '[\r\n]') {
+        Set-SqlMaintenanceSettingsStatus 'Enter an absolute drive or UNC directory on the SQL Server host.' '#F38BA8'
+        return
+    }
+    $fullBackupAge = 0
+    if (-not [int]::TryParse($txtSqlFullBackupAge.Text.Trim(), [ref]$fullBackupAge) -or $fullBackupAge -lt 5 -or $fullBackupAge -gt 1440) {
+        Set-SqlMaintenanceSettingsStatus 'Full backup age must be a whole number from 5 to 1440 minutes.' '#F38BA8'
+        return
+    }
+    $script:SqlMaintenanceConfig['LogicalLogName'] = $logName
+    $script:SqlMaintenanceConfig['ShrinkTargetMB'] = $target
+    $script:SqlMaintenanceConfig['GrowthMB'] = $growth
+    $script:SqlMaintenanceConfig['BackupDirectory'] = $directory
+    $script:ShrinkConfig['FullBackupMin'] = $fullBackupAge
+    Save-AllConfig
+    Update-SqlMaintenancePlan
+    Set-SqlMaintenanceSettingsStatus ("Saved at {0}. Backup file: ECS7_Log.trn." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
+})
 $btnSnapshot.Add_Click({ Start-Snapshot })
 $btnSnapSave.Add_Click({
     $k = 0; $dd = 0
@@ -3589,7 +4091,7 @@ $btnSnapOpen.Add_Click({
 # ------------------------------------------------------------
 $dgRemote.ItemsSource = $script:RemoteList
 # v2.23: which station services the Remote panel shows (matched on service name or display name)
-$script:RemoteServicePatterns = @('TeamViewer*', 'Spooler')
+$script:RemoteServicePatterns = @('TeamViewer*', 'AnyDesk*', 'Spooler')
 # Background job: optional Stop/Start/Restart of $targets (in order; stop runs in reverse), then reads the status of every EMBED service.
 $script:RemoteSvcScript = {
     param($computer, $action, $targets, $queryNames)
@@ -3647,11 +4149,32 @@ $script:RemoteSvcScript = {
     } catch {
         $rows += [PSCustomObject]@{ Name = ''; Display = ''; Status = 'Error'; StartType = ''; Detail = (Get-Deepest $_).Message }
     }
-    $connErr = ''
-    if (@($rows | Where-Object { $_.Status -ne 'Error' }).Count -eq 0) {
-        $first = @($rows | Where-Object { $_.Status -eq 'Error' }) | Select-Object -First 1
-        if ($first) { $connErr = $first.Detail }
+    try {
+        $processes = @(Get-WmiObject -Class Win32_Process -ComputerName $computer -Filter "Name = 'AnyDesk.exe'" -ErrorAction Stop)
+        if ($processes.Count -gt 0) {
+            $pids = (@($processes | ForEach-Object { $_.ProcessId }) -join ', ')
+            $rows += [PSCustomObject]@{
+                Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Running'
+                StartType = 'Process'; Detail = "PID: $pids. Process-only check; service controls do not apply."
+                IsProcess = $true
+            }
+        } else {
+            $rows += [PSCustomObject]@{
+                Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Not running'
+                StartType = 'Process'; Detail = 'Process-only check; service controls do not apply.'
+                IsProcess = $true
+            }
+        }
+    } catch {
+        $rows += [PSCustomObject]@{
+            Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Error'
+            StartType = 'Process'; Detail = "Could not query remote process: $((Get-Deepest $_).Message)"
+            IsProcess = $true
+        }
     }
+    $connErr = ''
+    $first = @($rows | Where-Object { $_.Status -eq 'Error' -and -not $_.Name }) | Select-Object -First 1
+    if ($first) { $connErr = $first.Detail }
     [PSCustomObject]@{ Computer = $computer; Rows = $rows; Log = $log; ConnectError = $connErr }
 }
 function Set-RemoteStatus([string]$text, [string]$hex) { $txtRemStatus.Text = $text; $txtRemStatus.Foreground = ColorBrush $hex }
@@ -3673,7 +4196,7 @@ function Start-RemoteJob([string]$Action, [string[]]$Targets) {
     if (-not $computer) { Set-RemoteStatus 'Enter a computer name or IP first.' '#F38BA8'; return }
     if ($computer -notmatch '^[A-Za-z0-9._-]+$') { Set-RemoteStatus 'Use letters, numbers, dots, dashes or underscores only.' '#F38BA8'; return }
     if ($script:RemoteJob) { Set-RemoteStatus 'Still working on the last request...' '#89B4FA'; return }
-    $names = [string[]]$script:RemoteServicePatterns   # TeamViewer + Print Spooler (v2.23)
+    $names = [string[]]$script:RemoteServicePatterns   # TeamViewer, AnyDesk, and Print Spooler
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
@@ -3728,6 +4251,7 @@ function Complete-RemoteJob {
 function Invoke-RemoteRowAction([string]$Action) {
     $row = $dgRemote.SelectedItem
     if (-not $row) { Set-RemoteStatus 'Select a service in the list first.' '#F9E2AF'; return }
+    if ($row.IsProcess) { Set-RemoteStatus 'AnyDesk.exe is monitored as a process; service controls do not apply.' '#F9E2AF'; return }
     if ($Action -ne 'Start') {
         $ans = [System.Windows.MessageBox]::Show("$Action $($row.Display) on $($txtRemHost.Text.Trim())?`r`nAnyone using it on that PC will be interrupted.", 'Remote service', 'YesNo', 'Question')
         if ($ans -ne 'Yes') { return }
@@ -3765,6 +4289,623 @@ $btnRemStack.Add_Click({
     if ($ans -ne 'Yes') { return }
     Start-RemoteJob 'Restart' $stack
 })
+# ------------------------------------------------------------
+# FIXED REMOTE ADMIN TASKS (HTTP TrustedHosts or HTTPS; no arbitrary command entry)
+# ------------------------------------------------------------
+$dgAdminServices.ItemsSource = $script:RemoteAdminList
+$script:RemoteAdminScript = {
+    param([string]$computer, [System.Management.Automation.PSCredential]$credential, [string]$transport, [string]$task, [string]$serviceName)
+    $session = $null
+    try {
+        $sessionOptions = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 30000
+        $sessionParams = @{
+            ComputerName = $computer
+            Authentication = 'Negotiate'
+            Credential = $credential
+            SessionOption = $sessionOptions
+            ErrorAction = 'Stop'
+        }
+        if ($transport -eq 'HTTPS') { $sessionParams.UseSSL = $true }
+        $session = New-PSSession @sessionParams
+        switch ($task) {
+            'Check' {
+                $data = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    $rdpDeny = (Get-ItemProperty -LiteralPath 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -ErrorAction Stop).fDenyTSConnections
+                    $rules = @(Get-NetFirewallRule -Name 'RemoteDesktop*' -ErrorAction SilentlyContinue)
+                    [PSCustomObject]@{
+                        Computer = $env:COMPUTERNAME
+                        RdpEnabled = ([int]$rdpDeny -eq 0)
+                        EnabledFirewallRules = @($rules | Where-Object { $_.Enabled -eq 'True' }).Count
+                        FirewallRulesFound = $rules.Count
+                    }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            'EnableRdp' {
+                $data = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    Set-ItemProperty -LiteralPath 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction Stop | Out-Null
+                    Set-ItemProperty -LiteralPath 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -ErrorAction Stop | Out-Null
+                    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction Stop | Out-Null
+                    [PSCustomObject]@{ Computer = $env:COMPUTERNAME; RdpEnabled = $true }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            'LoadServices' {
+                $rows = Invoke-Command -Session $session -ErrorAction Stop -ScriptBlock {
+                    $services = @(Get-Service -ErrorAction Stop | Where-Object {
+                        $_.Name -eq 'Spooler' -or $_.DisplayName -like '*Print Spooler*' -or
+                        $_.Name -like 'TeamViewer*' -or $_.DisplayName -like '*TeamViewer*' -or
+                        $_.Name -like 'AnyDesk*' -or $_.DisplayName -like '*AnyDesk*'
+                    })
+                    $results = @()
+                    foreach ($service in $services) {
+                        $results += [PSCustomObject]@{
+                            Name = $service.Name; Display = $service.DisplayName; Status = $service.Status.ToString()
+                            StartType = $service.StartType.ToString(); Detail = ''; IsProcess = $false
+                        }
+                    }
+                    if (-not (@($services | Where-Object { $_.Name -eq 'Spooler' }).Count)) {
+                        $results += [PSCustomObject]@{
+                            Name = 'Spooler'; Display = 'Print Spooler'; Status = 'Not installed'
+                            StartType = ''; Detail = 'Print Spooler service was not found.'; IsProcess = $false
+                        }
+                    }
+                    $processes = @(Get-Process -Name AnyDesk -ErrorAction SilentlyContinue)
+                    if ($processes.Count -gt 0) {
+                        $pids = (@($processes | ForEach-Object { $_.Id }) -join ', ')
+                        $results += [PSCustomObject]@{
+                            Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Running'
+                            StartType = 'Process'; Detail = "PID: $pids. Process-only check."; IsProcess = $true
+                        }
+                    } else {
+                        $results += [PSCustomObject]@{
+                            Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Not running'
+                            StartType = 'Process'; Detail = 'Process-only check.'; IsProcess = $true
+                        }
+                    }
+                    $results
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Rows = @($rows) }
+            }
+            { $_ -in 'StartService', 'RestartService' } {
+                if ($serviceName -ne 'Spooler' -and $serviceName -notlike 'TeamViewer*' -and $serviceName -notlike 'AnyDesk*') {
+                    throw "Service '$serviceName' is not in the allowed remote service list."
+                }
+                $data = Invoke-Command -Session $session -ArgumentList $task, $serviceName -ErrorAction Stop -ScriptBlock {
+                    param($operation, $name)
+                    $service = Get-Service -Name $name -ErrorAction Stop
+                    if ($service.StartType -eq 'Disabled') { throw "Service '$name' is disabled." }
+                    if ($operation -eq 'StartService') {
+                        if ($service.Status -ne 'Running') {
+                            Start-Service -Name $name -ErrorAction Stop
+                            (Get-Service -Name $name -ErrorAction Stop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+                        }
+                    } else {
+                        if ($service.Status -eq 'Running') {
+                            Restart-Service -Name $name -Force -ErrorAction Stop
+                        } else {
+                            Start-Service -Name $name -ErrorAction Stop
+                        }
+                        (Get-Service -Name $name -ErrorAction Stop).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+                    }
+                    [PSCustomObject]@{ Computer = $env:COMPUTERNAME; Name = $name; Status = (Get-Service -Name $name).Status.ToString() }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            default { throw "Unsupported remote task '$task'." }
+        }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Task = $task; Error = $_.Exception.Message }
+    } finally {
+        if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+    }
+}
+$script:RemoteAdminWmiScript = {
+    param([string]$computer, [System.Management.Automation.PSCredential]$credential, [string]$task, [string]$serviceName)
+    $scope = $null
+    $defaultScope = $null
+    $firewallScope = $null
+    $registry = $null
+    $password = $null
+    try {
+        Add-Type -AssemblyName System.Management
+        $networkCredential = New-Object System.Net.NetworkCredential('', $credential.Password)
+        $password = $networkCredential.Password
+        $connectionOptions = New-Object System.Management.ConnectionOptions
+        $connectionOptions.Username = $credential.UserName
+        $connectionOptions.Password = $password
+        $connectionOptions.Impersonation = [System.Management.ImpersonationLevel]::Impersonate
+        $connectionOptions.Authentication = [System.Management.AuthenticationLevel]::PacketPrivacy
+        $connectionOptions.EnablePrivileges = $true
+        $connectionOptions.Timeout = [TimeSpan]::FromSeconds(15)
+
+        $scope = New-Object System.Management.ManagementScope("\\$computer\root\cimv2", $connectionOptions)
+        $scope.Connect()
+        $defaultScope = New-Object System.Management.ManagementScope("\\$computer\root\default", $connectionOptions)
+        $firewallScope = New-Object System.Management.ManagementScope("\\$computer\root\standardcimv2", $connectionOptions)
+        $defaultScope.Connect()
+        $firewallScope.Connect()
+
+        $registryPath = 'System\CurrentControlSet\Control\Terminal Server'
+        $regClass = New-Object System.Management.ManagementClass($defaultScope, (New-Object System.Management.ManagementPath('StdRegProv')), $null)
+        $registry = $regClass
+        $hklm = [uint32]2147483650
+        $findFirewallRules = {
+            $query = New-Object System.Management.ObjectQuery("SELECT * FROM MSFT_NetFirewallRule WHERE DisplayGroup = 'Remote Desktop'")
+            $searcher = New-Object System.Management.ManagementObjectSearcher($firewallScope, $query)
+            try { return @($searcher.Get()) } finally { $searcher.Dispose() }
+        }
+
+        switch ($task) {
+            'Check' {
+                $inputParams = $registry.GetMethodParameters('GetDWORDValue')
+                $inputParams.hDefKey = $hklm
+                $inputParams.sSubKeyName = $registryPath
+                $inputParams.sValueName = 'fDenyTSConnections'
+                $rdpResult = $registry.InvokeMethod('GetDWORDValue', $inputParams, $null)
+                if ($rdpResult.ReturnValue -ne 0) { throw "Could not read the Remote Desktop registry value (WMI return $($rdpResult.ReturnValue))." }
+
+                $rules = @(& $findFirewallRules)
+                $enabledRules = @($rules | Where-Object { [int]$_.Enabled -eq 1 }).Count
+                $data = [PSCustomObject]@{
+                    Computer = $computer
+                    RdpEnabled = ([int]$rdpResult.uValue -eq 0)
+                    EnabledFirewallRules = $enabledRules
+                    FirewallRulesFound = $rules.Count
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            'EnableWinRM' {
+                $processClass = New-Object System.Management.ManagementClass(
+                    $scope, (New-Object System.Management.ManagementPath('Win32_Process')), $null)
+                $processResult = $null
+                try {
+                    $inputParams = $processClass.GetMethodParameters('Create')
+                    $inputParams.CommandLine = 'cmd.exe /d /c winrm quickconfig -force'
+                    $processResult = $processClass.InvokeMethod('Create', $inputParams, $null)
+                    $processReturnValue = [int]$processResult.ReturnValue
+                    $processId = [uint32]$processResult.ProcessId
+                } finally {
+                    if ($processResult) { $processResult.Dispose() }
+                    $processClass.Dispose()
+                }
+                if ($processReturnValue -ne 0) {
+                    throw "Could not start winrm quickconfig (WMI return $processReturnValue)."
+                }
+
+                $deadline = (Get-Date).AddSeconds(90)
+                $processRunning = $true
+                while ($processRunning -and (Get-Date) -lt $deadline) {
+                    Start-Sleep -Milliseconds 500
+                    $processQuery = New-Object System.Management.ObjectQuery(
+                        "SELECT ProcessId FROM Win32_Process WHERE ProcessId = $processId")
+                    $processSearcher = New-Object System.Management.ManagementObjectSearcher($scope, $processQuery)
+                    $processes = @()
+                    try {
+                        $processes = @($processSearcher.Get())
+                        $processRunning = ($processes.Count -gt 0)
+                    } finally {
+                        foreach ($process in $processes) { $process.Dispose() }
+                        $processSearcher.Dispose()
+                    }
+                }
+                if ($processRunning) {
+                    throw 'Timed out waiting for winrm quickconfig to finish. The target may still be configuring WinRM; check it before retrying.'
+                }
+
+                $serviceQuery = New-Object System.Management.ObjectQuery(
+                    "SELECT State, StartMode FROM Win32_Service WHERE Name = 'WinRM'")
+                $serviceSearcher = New-Object System.Management.ManagementObjectSearcher($scope, $serviceQuery)
+                $services = @()
+                try {
+                    $services = @($serviceSearcher.Get())
+                    $winRmService = $services | Select-Object -First 1
+                    if (-not $winRmService) { throw 'The target WinRM service was not found after quickconfig.' }
+                    $serviceState = [string]$winRmService.State
+                    $serviceStartMode = [string]$winRmService.StartMode
+                } finally {
+                    foreach ($service in $services) { $service.Dispose() }
+                    $serviceSearcher.Dispose()
+                }
+                if ($serviceState -ne 'Running') {
+                    throw "winrm quickconfig finished, but the WinRM service is $serviceState (startup: $serviceStartMode)."
+                }
+
+                $listenerPath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Listener'
+                $listenerParams = $registry.GetMethodParameters('EnumKey')
+                $listenerParams.hDefKey = $hklm
+                $listenerParams.sSubKeyName = $listenerPath
+                $listenerResult = $registry.InvokeMethod('EnumKey', $listenerParams, $null)
+                if ($listenerResult.ReturnValue -ne 0) {
+                    throw "winrm quickconfig finished, but the WinRM listener configuration could not be read (WMI return $($listenerResult.ReturnValue))."
+                }
+                $httpPort = ''
+                foreach ($listenerName in @($listenerResult.sNames)) {
+                    $valueParams = $registry.GetMethodParameters('GetStringValue')
+                    $valueParams.hDefKey = $hklm
+                    $valueParams.sSubKeyName = "$listenerPath\$listenerName"
+                    $valueParams.sValueName = 'Transport'
+                    $transportResult = $registry.InvokeMethod('GetStringValue', $valueParams, $null)
+                    if ($transportResult.ReturnValue -ne 0) {
+                        $transportResult.Dispose()
+                        continue
+                    }
+                    $listenerTransport = [string]$transportResult.sValue
+                    $transportResult.Dispose()
+                    if ($listenerTransport -ne 'HTTP') { continue }
+                    $portParams = $registry.GetMethodParameters('GetDWORDValue')
+                    $portParams.hDefKey = $hklm
+                    $portParams.sSubKeyName = "$listenerPath\$listenerName"
+                    $portParams.sValueName = 'Port'
+                    $portResult = $registry.InvokeMethod('GetDWORDValue', $portParams, $null)
+                    if ($portResult.ReturnValue -eq 0) {
+                        $httpPort = [string]$portResult.uValue
+                    } else {
+                        $portResult.Dispose()
+                        $portParams = $registry.GetMethodParameters('GetStringValue')
+                        $portParams.hDefKey = $hklm
+                        $portParams.sSubKeyName = "$listenerPath\$listenerName"
+                        $portParams.sValueName = 'Port'
+                        $portResult = $registry.InvokeMethod('GetStringValue', $portParams, $null)
+                        if ($portResult.ReturnValue -eq 0) { $httpPort = [string]$portResult.sValue }
+                    }
+                    $portResult.Dispose()
+                    if ($httpPort) { break }
+                }
+                $listenerResult.Dispose()
+                if (-not $httpPort) {
+                    throw 'winrm quickconfig finished, but no HTTP WinRM listener was found.'
+                }
+
+                $firewallQuery = New-Object System.Management.ObjectQuery(
+                    "SELECT Enabled FROM MSFT_NetFirewallRule WHERE Name LIKE 'WINRM-HTTP-In-TCP%'")
+                $firewallSearcher = New-Object System.Management.ManagementObjectSearcher($firewallScope, $firewallQuery)
+                $firewallRules = @()
+                try {
+                    $firewallRules = @($firewallSearcher.Get())
+                    $enabledFirewallRules = @($firewallRules | Where-Object { [int]$_.Enabled -eq 1 }).Count
+                } finally {
+                    foreach ($firewallRule in $firewallRules) { $firewallRule.Dispose() }
+                    $firewallSearcher.Dispose()
+                }
+                return [PSCustomObject]@{
+                    Ok = $true; Task = $task
+                    Data = [PSCustomObject]@{
+                        Computer = $computer; ServiceStatus = $serviceState
+                        ListenerPort = $httpPort; EnabledFirewallRules = $enabledFirewallRules
+                    }
+                }
+            }
+            'EnableRdp' {
+                foreach ($entry in @(
+                    @{ Path = $registryPath; Name = 'fDenyTSConnections'; Value = [uint32]0 },
+                    @{ Path = ($registryPath + '\WinStations\RDP-Tcp'); Name = 'UserAuthentication'; Value = [uint32]1 }
+                )) {
+                    $inputParams = $registry.GetMethodParameters('SetDWORDValue')
+                    $inputParams.hDefKey = $hklm
+                    $inputParams.sSubKeyName = $entry.Path
+                    $inputParams.sValueName = $entry.Name
+                    $inputParams.uValue = $entry.Value
+                    $setResult = $registry.InvokeMethod('SetDWORDValue', $inputParams, $null)
+                    if ($setResult.ReturnValue -ne 0) { throw "Could not set $($entry.Name) (WMI return $($setResult.ReturnValue))." }
+                }
+                $rules = @(& $findFirewallRules)
+                if ($rules.Count -eq 0) { throw 'No Remote Desktop firewall rules were found in root\standardcimv2.' }
+                foreach ($rule in $rules) {
+                    if ([int]$rule.Enabled -ne 1) {
+                        $rule['Enabled'] = [uint16]1
+                        $null = $rule.Put()
+                    }
+                    $rule.Dispose()
+                }
+                return [PSCustomObject]@{
+                    Ok = $true; Task = $task
+                    Data = [PSCustomObject]@{ Computer = $computer; RdpEnabled = $true; FirewallRulesEnabled = $rules.Count }
+                }
+            }
+            'LoadServices' {
+                $query = New-Object System.Management.ObjectQuery('SELECT Name, DisplayName, State, StartMode FROM Win32_Service')
+                $searcher = New-Object System.Management.ManagementObjectSearcher($scope, $query)
+                try { $services = @($searcher.Get()) } finally { $searcher.Dispose() }
+                $rows = @()
+                $hasSpooler = $false
+                foreach ($service in $services) {
+                    $matches = ($service.Name -eq 'Spooler' -or $service.DisplayName -like '*Print Spooler*' -or
+                        $service.Name -like 'TeamViewer*' -or $service.DisplayName -like '*TeamViewer*' -or
+                        $service.Name -like 'AnyDesk*' -or $service.DisplayName -like '*AnyDesk*')
+                    if ($matches) {
+                        if ($service.Name -eq 'Spooler') { $hasSpooler = $true }
+                        $status = [string]$service.State
+                        if ($status -eq 'Running') { $status = 'Running' }
+                        elseif ($status -eq 'Stopped') { $status = 'Stopped' }
+                        $rows += [PSCustomObject]@{
+                            Name = [string]$service.Name; Display = [string]$service.DisplayName
+                            Status = $status; StartType = [string]$service.StartMode; Detail = ''; IsProcess = $false
+                        }
+                    }
+                    $service.Dispose()
+                }
+                if (-not $hasSpooler) {
+                    $rows += [PSCustomObject]@{
+                        Name = 'Spooler'; Display = 'Print Spooler'; Status = 'Not installed'
+                        StartType = ''; Detail = 'Print Spooler service was not found.'; IsProcess = $false
+                    }
+                }
+                $processQuery = New-Object System.Management.ObjectQuery("SELECT ProcessId FROM Win32_Process WHERE Name = 'AnyDesk.exe'")
+                $processSearcher = New-Object System.Management.ManagementObjectSearcher($scope, $processQuery)
+                try { $processes = @($processSearcher.Get()) } finally { $processSearcher.Dispose() }
+                if ($processes.Count -gt 0) {
+                    $pids = (@($processes | ForEach-Object { $_.ProcessId }) -join ', ')
+                    $rows += [PSCustomObject]@{
+                        Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Running'
+                        StartType = 'Process'; Detail = "PID: $pids. Process-only check."; IsProcess = $true
+                    }
+                    foreach ($process in $processes) { $process.Dispose() }
+                } else {
+                    $rows += [PSCustomObject]@{
+                        Name = 'AnyDesk.exe'; Display = 'AnyDesk process'; Status = 'Not running'
+                        StartType = 'Process'; Detail = 'Process-only check.'; IsProcess = $true
+                    }
+                }
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Rows = $rows }
+            }
+            { $_ -in 'StartService', 'RestartService' } {
+                if ($serviceName -ne 'Spooler' -and $serviceName -notlike 'TeamViewer*' -and $serviceName -notlike 'AnyDesk*') {
+                    throw "Service '$serviceName' is not in the allowed remote service list."
+                }
+                $escapedName = $serviceName.Replace('\', '\\').Replace("'", "\'")
+                $query = New-Object System.Management.ObjectQuery("SELECT * FROM Win32_Service WHERE Name = '$escapedName'")
+                $searcher = New-Object System.Management.ManagementObjectSearcher($scope, $query)
+                try { $service = @($searcher.Get()) | Select-Object -First 1 } finally { $searcher.Dispose() }
+                if (-not $service) { throw "Service '$serviceName' was not found." }
+                if ([string]$service.StartMode -eq 'Disabled') { throw "Service '$serviceName' is disabled." }
+                if ($task -eq 'RestartService' -and [string]$service.State -eq 'Running') {
+                    $stopResult = $service.InvokeMethod('StopService', $null, $null)
+                    if ($stopResult.ReturnValue -ne 0) { throw "Could not stop '$serviceName' (WMI return $($stopResult.ReturnValue))." }
+                    $deadline = (Get-Date).AddSeconds(30)
+                    do {
+                        Start-Sleep -Milliseconds 500
+                        $service.Get()
+                    } while ([string]$service.State -ne 'Stopped' -and (Get-Date) -lt $deadline)
+                    if ([string]$service.State -ne 'Stopped') { throw "Timed out waiting for '$serviceName' to stop." }
+                }
+                if ([string]$service.State -ne 'Running') {
+                    $startResult = $service.InvokeMethod('StartService', $null, $null)
+                    if ($startResult.ReturnValue -ne 0) { throw "Could not start '$serviceName' (WMI return $($startResult.ReturnValue))." }
+                }
+                $deadline = (Get-Date).AddSeconds(30)
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $service.Get()
+                } while ([string]$service.State -ne 'Running' -and (Get-Date) -lt $deadline)
+                if ([string]$service.State -ne 'Running') { throw "Timed out waiting for '$serviceName' to run." }
+                $data = [PSCustomObject]@{ Computer = $computer; Name = $serviceName; Status = [string]$service.State }
+                $service.Dispose()
+                return [PSCustomObject]@{ Ok = $true; Task = $task; Data = $data }
+            }
+            default { throw "Unsupported remote task '$task'." }
+        }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Task = $task; Error = $_.Exception.Message }
+    } finally {
+        if ($registry) { $registry.Dispose() }
+        if ($scope) { $scope.Dispose() }
+        if ($defaultScope) { $defaultScope.Dispose() }
+        if ($firewallScope) { $firewallScope.Dispose() }
+        $password = $null
+    }
+}
+function Set-RemoteAdminStatus([string]$text, [string]$hex) {
+    $txtAdminStatus.Text = $text
+    $txtAdminStatus.Foreground = ColorBrush $hex
+}
+function Set-RemoteAdminButtons([bool]$enabled) {
+    foreach ($button in @($btnAdminCheck, $btnAdminEnableRdp, $btnAdminEnableWinRm, $btnAdminLoadServices, $btnAdminStartService, $btnAdminRestartService)) {
+        $button.IsEnabled = $enabled
+    }
+}
+function Start-RemoteAdminTask([string]$Task, [string]$ServiceName) {
+    $computer = $txtAdminHost.Text.Trim()
+    $transport = switch ($cmbAdminTransport.SelectedIndex) {
+        1 { 'HTTPS' }
+        2 { 'WMI/DCOM' }
+        default { 'HTTP' }
+    }
+    if (-not $computer -or $computer -notmatch '^[A-Za-z0-9._-]+$') {
+        Set-RemoteAdminStatus 'Enter a valid computer hostname or IP.' '#F38BA8'
+        return
+    }
+    if ($script:RemoteAdminJob) { Set-RemoteAdminStatus 'A remote admin task is already running.' '#F9E2AF'; return }
+    if ($Task -eq 'EnableWinRM' -and $transport -ne 'WMI/DCOM') {
+        Set-RemoteAdminStatus 'Select WMI / DCOM to enable WinRM; this action cannot bootstrap through WinRM.' '#F9E2AF'
+        return
+    }
+    if ($transport -eq 'HTTP') {
+        try {
+            $trustedHosts = [string](Get-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -ErrorAction Stop).Value
+            $trustedEntries = @($trustedHosts -split ',' | ForEach-Object { $_.Trim() })
+            if ($computer -notin $trustedEntries) {
+                Set-RemoteAdminStatus "HTTP WinRM blocked: '$computer' is not an exact TrustedHosts entry on this PC. Add only the intended target IP/name to TrustedHosts, then retry." '#F38BA8'
+                return
+            }
+        } catch {
+            Set-RemoteAdminStatus "Could not read this PC's WinRM TrustedHosts configuration: $($_.Exception.Message)" '#F38BA8'
+            return
+        }
+    }
+    $device = $dgDevices.SelectedItem
+    $credentialHost = [string]$computer
+    if ($device -and $device.Name -and
+        ($computer -ieq [string]$device.Name -or $computer -in @([string]$device.CurrentIP, [string]$device.LastKnownIP))) {
+        $credentialHost = ([string]$device.Name -split '\.')[0]
+    }
+    $credentialUser = 'emb-ecs'
+    if ($credentialHost -and $credentialHost -notmatch '^[0-9.]+$' -and $credentialHost -notmatch '^[0-9A-Fa-f:]+$') {
+        $credentialUser = "$credentialHost\emb-ecs"
+    } elseif ($device -and $device.Name) {
+        $resolvedHost = ([string]$device.Name -split '\.')[0]
+        if ($resolvedHost) { $credentialUser = "$resolvedHost\emb-ecs" }
+    }
+    $credential = $null
+    $rs = $null
+    $ps = $null
+    try {
+        $credential = Get-Credential -UserName $credentialUser -Message "Enter an administrator account for $computer ($transport)."
+        if (-not $credential) { Set-RemoteAdminStatus 'Cancelled; no remote task was run.' '#6C7086'; return }
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        $workerScript = $script:RemoteAdminScript
+        if ($transport -eq 'WMI/DCOM') { $workerScript = $script:RemoteAdminWmiScript }
+        if ($transport -eq 'WMI/DCOM') {
+            [void]$ps.AddScript($workerScript.ToString()).AddArgument($computer).AddArgument($credential).AddArgument($Task).AddArgument($ServiceName)
+        } else {
+            [void]$ps.AddScript($workerScript.ToString()).AddArgument($computer).AddArgument($credential).AddArgument($transport).AddArgument($Task).AddArgument($ServiceName)
+        }
+        $script:RemoteAdminJob = @{
+            PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Task = $Task
+            Computer = $computer; Credential = $credential; Transport = $transport
+        }
+        if ($Task -eq 'LoadServices') {
+            $script:RemoteAdminList.Clear()
+            $script:RemoteAdminListHost = ''
+            $script:RemoteAdminListTransport = ''
+        }
+        Set-RemoteAdminButtons $false
+        $taskLabel = @{
+            Check = "Checking $transport, RDP, and firewall status"
+            EnableRdp = 'Enabling RDP'
+            EnableWinRM = 'Configuring WinRM through WMI/DCOM'
+            LoadServices = 'Checking services'
+            StartService = "Starting $ServiceName"
+            RestartService = "Restarting $ServiceName"
+        }[$Task]
+        Set-RemoteAdminStatus "$taskLabel on $computer..." '#89B4FA'
+    } catch {
+        if ($credential -and $credential.Password) { $credential.Password.Dispose() }
+        if ($ps) { $ps.Dispose() }
+        if ($rs) { if ($rs.RunspaceStateInfo.State -eq 'Opened') { $rs.Close() }; $rs.Dispose() }
+        Set-RemoteAdminButtons $true
+        Set-RemoteAdminStatus "Could not start remote task: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-RemoteAdminTask {
+    $job = $script:RemoteAdminJob
+    $script:RemoteAdminJob = $null
+    Set-RemoteAdminButtons $true
+    $result = $null
+    try {
+        $result = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1
+    } catch {
+        Set-RemoteAdminStatus "Remote task failed: $($_.Exception.Message)" '#F38BA8'
+        return
+    } finally {
+        try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {}
+        if ($job.Credential -and $job.Credential.Password) { $job.Credential.Password.Dispose() }
+    }
+    if (-not $result) { Set-RemoteAdminStatus 'The remote task returned no result.' '#F38BA8'; return }
+    if (-not $result.Ok) {
+        $setupHint = 'Confirm WinRM is enabled on the target and that the account is an administrator.'
+        if ($job.Transport -eq 'HTTP') {
+            $setupHint = 'Confirm the target has the default HTTP WinRM listener, this exact target is in TrustedHosts, and the account is an administrator.'
+        } elseif ($job.Transport -eq 'HTTPS') {
+            $setupHint = 'Confirm the target has an HTTPS WinRM listener, a trusted certificate matching the hostname, and an administrator account.'
+        } else {
+            $setupHint = 'Confirm TCP 135 and the dynamic RPC port range are allowed through the target firewall, WMI/DCOM remote access is enabled, and the account is an administrator.'
+        }
+        Set-RemoteAdminStatus ("{0} remote task failed on {1}: {2} {3}" -f $job.Transport, $job.Computer, $result.Error, $setupHint) '#F38BA8'
+        return
+    }
+    switch ($job.Task) {
+        'Check' {
+            $rdp = 'Disabled'; if ($result.Data.RdpEnabled) { $rdp = 'Enabled' }
+            $firewall = "$($result.Data.EnabledFirewallRules) enabled of $($result.Data.FirewallRulesFound) RDP firewall rules"
+            if ($result.Data.FirewallRulesFound -eq 0) { $firewall = 'No matching RDP firewall rules found' }
+            Set-RemoteAdminStatus ("{0} connected to {1}. RDP: {2}; {3}." -f $job.Transport, $result.Data.Computer, $rdp, $firewall) '#A6E3A1'
+        }
+        'EnableRdp' {
+            Set-RemoteAdminStatus ("RDP and the Remote Desktop firewall group were enabled on {0}. Test the RDP connection." -f $result.Data.Computer) '#A6E3A1'
+        }
+        'EnableWinRM' {
+            $message = "WinRM HTTP is enabled on {0} (listener port {1}; service {2})." -f $result.Data.Computer, $result.Data.ListenerPort, $result.Data.ServiceStatus
+            if ($result.Data.EnabledFirewallRules -gt 0) {
+                $message += " $($result.Data.EnabledFirewallRules) matching inbound firewall rule(s) are enabled."
+                Set-RemoteAdminStatus $message '#A6E3A1'
+            } else {
+                $message += ' No enabled WinRM HTTP firewall rule was found; check the target firewall or Group Policy.'
+                Set-RemoteAdminStatus $message '#F9E2AF'
+            }
+        }
+        'LoadServices' {
+            $script:RemoteAdminList.Clear()
+            foreach ($row in @($result.Rows)) { $script:RemoteAdminList.Add($row) }
+            $script:RemoteAdminListHost = [string]$job.Computer
+            $script:RemoteAdminListTransport = [string]$job.Transport
+            Set-RemoteAdminStatus ("Loaded {0} service/process checks from {1}. AnyDesk.exe is check-only." -f $script:RemoteAdminList.Count, $job.Computer) '#A6E3A1'
+        }
+        { $_ -in 'StartService', 'RestartService' } {
+            Set-RemoteAdminStatus ("{0} is {1} on {2}." -f $result.Data.Name, $result.Data.Status, $job.Computer) '#A6E3A1'
+        }
+    }
+}
+function Invoke-RemoteAdminServiceAction([string]$Task) {
+    $row = $dgAdminServices.SelectedItem
+    if (-not $row) { Set-RemoteAdminStatus 'Select a service first.' '#F9E2AF'; return }
+    $transport = switch ($cmbAdminTransport.SelectedIndex) {
+        1 { 'HTTPS' }
+        2 { 'WMI/DCOM' }
+        default { 'HTTP' }
+    }
+    if ($script:RemoteAdminListHost -ne $txtAdminHost.Text.Trim() -or $script:RemoteAdminListTransport -ne $transport) {
+        Set-RemoteAdminStatus 'Reload the service list for the current computer and transport before running a service action.' '#F9E2AF'
+        return
+    }
+    if ($row.IsProcess) { Set-RemoteAdminStatus 'AnyDesk.exe is a process check and cannot be started or restarted as a service.' '#F9E2AF'; return }
+    if ($row.Name -ne 'Spooler' -and $row.Name -notlike 'TeamViewer*' -and $row.Name -notlike 'AnyDesk*') {
+        Set-RemoteAdminStatus 'That service is not in the allowed remote service list.' '#F38BA8'
+        return
+    }
+    $action = 'Start'; if ($Task -eq 'RestartService') { $action = 'Restart' }
+    $answer = [System.Windows.MessageBox]::Show("$action $($row.Display) on $($txtAdminHost.Text.Trim())?", 'Confirm remote service action', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    Start-RemoteAdminTask $Task ([string]$row.Name)
+}
+$btnDevRemoteAdmin.Add_Click({
+    $device = $dgDevices.SelectedItem
+    if (-not $device) { $txtDevStatus.Text = 'Select a device first.'; return }
+    $txtAdminHost.Text = Get-DeviceTarget $device
+    $script:RemoteAdminList.Clear()
+    $script:RemoteAdminListHost = ''
+    $script:RemoteAdminListTransport = ''
+    $pnlRemote.Visibility = 'Collapsed'
+    $pnlDiscover.Visibility = 'Collapsed'
+    $pnlRemoteAdmin.Visibility = 'Visible'
+    Set-RemoteAdminStatus 'HTTP requires an exact TrustedHosts entry; HTTPS requires a trusted matching certificate; WMI/DCOM requires TCP 135 and dynamic RPC access. Test readiness first.' '#6C7086'
+})
+$btnAdminCheck.Add_Click({ Start-RemoteAdminTask 'Check' '' })
+$btnAdminEnableRdp.Add_Click({
+    $answer = [System.Windows.MessageBox]::Show(
+        "Enable Remote Desktop and its firewall rules on $($txtAdminHost.Text.Trim())?`r`nThis changes the remote computer's registry and firewall configuration.",
+        'Confirm enabling Remote Desktop', 'YesNo', 'Warning')
+    if ($answer -eq 'Yes') { Start-RemoteAdminTask 'EnableRdp' '' }
+})
+$btnAdminEnableWinRm.Add_Click({
+    if ($cmbAdminTransport.SelectedIndex -ne 2) {
+        Set-RemoteAdminStatus 'Select WMI / DCOM before enabling WinRM; this action cannot bootstrap through WinRM.' '#F9E2AF'
+        return
+    }
+    $answer = [System.Windows.MessageBox]::Show(
+        "Run the fixed 'winrm quickconfig -force' setup on $($txtAdminHost.Text.Trim()) through WMI/DCOM?`r`n`r`nThis enables the WinRM service, creates an HTTP listener (normally port 5985), and configures the target firewall. Review the target's firewall policy afterward.",
+        'Confirm enabling WinRM',
+        'YesNo',
+        'Warning')
+    if ($answer -eq 'Yes') { Start-RemoteAdminTask 'EnableWinRM' '' }
+})
+$btnAdminLoadServices.Add_Click({ Start-RemoteAdminTask 'LoadServices' '' })
+$btnAdminStartService.Add_Click({ Invoke-RemoteAdminServiceAction 'StartService' })
+$btnAdminRestartService.Add_Click({ Invoke-RemoteAdminServiceAction 'RestartService' })
+$btnAdminClose.Add_Click({ $pnlRemoteAdmin.Visibility = 'Collapsed' })
 # ------------------------------------------------------------
 # DATABASE VERSION (header badge)
 # Reads Property_Id 22608 / 22609 / 22610 (Database Version / Full / Informational) from the EMBED properties table.
@@ -4923,7 +6064,7 @@ $dgDevices.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEven
     param($sender, $e)
     $btn = $e.OriginalSource
     if (-not ($btn -is [System.Windows.Controls.Button])) { return }
-    $map = @{ 'Connect' = $btnDevConnect; 'Ping' = $btnDevPing; 'Services' = $btnDevServices; 'Snapshot' = $btnDevSnapshot; 'Software' = $btnDevSoftware; 'Remove' = $btnDevRemove }
+    $map = @{ 'Connect' = $btnDevConnect; 'Ping' = $btnDevPing; 'Services' = $btnDevServices; 'RemoteAdmin' = $btnDevRemoteAdmin; 'Snapshot' = $btnDevSnapshot; 'Software' = $btnDevSoftware; 'Remove' = $btnDevRemove }
     $target = $map[[string]$btn.Tag]
     if (-not $target) { return }
     $dgDevices.SelectedItem = $btn.DataContext
@@ -4947,26 +6088,11 @@ $dgDevices.Add_PreviewMouseLeftButtonDown({
 })
 $txtSwRoot.Text = [string]$script:SoftwareConfig['StationRoot']
 # ------------------------------------------------------------
-# TIMERS (service refresh on Settings, device check on Devices)
+# DEVICE CHECK INTERVAL
 # ------------------------------------------------------------
-function Initialize-TimerUi {
-    $txtRefreshEvery.Text = [string]$script:RefreshSecs
-    $txtRefreshHint.Text  = "= $(Format-Countdown $script:RefreshSecs)  (10 sec to 90 min)"
+function Initialize-DeviceIntervalUi {
     $txtDevEvery.Text     = [string]$script:DeviceSecs
 }
-function Set-TimersStatus([string]$text, [string]$hex) { $txtTimersStatus.Text = $text; $txtTimersStatus.Foreground = ColorBrush $hex }
-$btnTimersSave.Add_Click({
-    $v = 0
-    if (-not [int]::TryParse($txtRefreshEvery.Text.Trim(), [ref]$v) -or $v -lt 10 -or $v -gt 5400) {
-        Set-TimersStatus 'Service refresh must be a number from 10 to 5400 seconds.' '#F38BA8'; return
-    }
-    $script:RefreshSecs   = $v
-    $script:CountdownSecs = $v
-    $txtCountdown.Text    = Format-Countdown $v
-    Save-AllConfig
-    Initialize-TimerUi
-    Set-TimersStatus ("Saved at {0}. Services refresh every {1}." -f (Get-Date).ToString('HH:mm:ss'), (Format-Countdown $v)) '#A6E3A1'
-})
 function Apply-DeviceInterval {
     $v = 0
     if (-not [int]::TryParse($txtDevEvery.Text.Trim(), [ref]$v) -or $v -lt 30 -or $v -gt 3600) {
@@ -4982,26 +6108,6 @@ function Apply-DeviceInterval {
 }
 $txtDevEvery.Add_KeyDown({ if ($_.Key -eq 'Return') { Apply-DeviceInterval } })
 $txtDevEvery.Add_LostFocus({ Apply-DeviceInterval })
-# ------------------------------------------------------------
-# SETTINGS TAB: SQL MAINTENANCE (log shrink target + the full backup gate)
-# ------------------------------------------------------------
-function Set-MaintStatus([string]$text, [string]$hex) { $txtMaintStatus.Text = $text; $txtMaintStatus.Foreground = ColorBrush $hex }
-function Initialize-MaintUi {
-    $txtSetShrinkTarget.Text = [string]$script:ShrinkConfig['TargetMB']
-    $txtSetShrinkGuard.Text  = [string]$script:ShrinkConfig['FullBackupMin']
-}
-$btnMaintSave.Add_Click({
-    $t = 0; $g = 0
-    if (-not [int]::TryParse($txtSetShrinkTarget.Text.Trim(), [ref]$t) -or $t -lt 16 -or $t -gt 102400) { Set-MaintStatus 'Shrink target: 16 to 102400 MB.' '#F38BA8'; return }
-    if (-not [int]::TryParse($txtSetShrinkGuard.Text.Trim(), [ref]$g) -or $g -lt 5 -or $g -gt 1440)       { Set-MaintStatus 'Full backup age: 5 to 1440 minutes.' '#F38BA8'; return }
-    $script:ShrinkConfig['TargetMB'] = $t
-    $script:ShrinkConfig['FullBackupMin'] = $g
-    Save-AllConfig
-    Initialize-MaintUi
-    Update-ShrinkUi
-    Set-MaintStatus ("Saved at {0}." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
-})
-
 # ------------------------------------------------------------
 # SQL TAB (backups, file sizes, database version) - read-only
 # ------------------------------------------------------------
@@ -5120,8 +6226,133 @@ $script:SqlScript = {
     } finally { if ($cn) { $cn.Dispose() } }
     [PSCustomObject]$o
 }
+$script:SqlMaintenanceScript = {
+    param($sqlServer, [string]$logicalLogName, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory, [int]$fullBackupMin)
+    $backupPath = $backupDirectory.TrimEnd('\') + '\ECS7_Log.trn'
+    $escapedLogicalLogName = $logicalLogName.Replace("'", "''")
+    $quotedLogicalLogName = '[' + $logicalLogName.Replace(']', ']]') + ']'
+    $o = [ordered]@{
+        Ok = $false; Stage = 'Connect'; Error = ''; BackupPath = $backupPath; LogicalLogName = $logicalLogName; ShrinkTargetMB = $shrinkTargetMb; GrowthMB = $growthMb
+        BackupCompleted = $false; ShrinkCompleted = $false; GrowthConfigured = $false
+        ShrinkTargetReached = $false; SizeMB = 0.0; LogReuseWait = ''
+    }
+    function Get-Deepest($err) { $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }; $e.Message }
+    function New-Conn([string]$db) {
+        $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+        $b['Data Source']            = $sqlServer
+        $b['Initial Catalog']        = $db
+        $b['Integrated Security']    = $true
+        $b['TrustServerCertificate'] = $true
+        $b['Connect Timeout']        = 10
+        $b['Application Name']       = 'EMBED Services Dashboard'
+        New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
+    }
+    function Invoke-NonQuery($conn, [string]$sql) {
+        $cmd = $conn.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 1800
+            $cmd.CommandText = $sql
+            [void]$cmd.ExecuteNonQuery()
+        } finally { $cmd.Dispose() }
+    }
+    $cn = $null
+    try {
+        $cn = New-Conn 'master'
+        $cn.Open()
+
+        $o.Stage = 'Preflight'
+        $cmd = $cn.CreateCommand()
+        $reader = $null
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = 'SELECT state_desc, recovery_model_desc FROM sys.databases WHERE name = @databaseName'
+            [void]$cmd.Parameters.AddWithValue('@databaseName', 'ECS7')
+            $reader = $cmd.ExecuteReader()
+            if (-not $reader.Read()) { throw 'Database ECS7 was not found on the configured SQL Server.' }
+            $databaseState = [string]$reader['state_desc']
+            $recoveryModel = [string]$reader['recovery_model_desc']
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            $cmd.Dispose()
+        }
+        if ($databaseState -ne 'ONLINE') { throw "Database ECS7 is $databaseState, not ONLINE." }
+        if ($recoveryModel -eq 'SIMPLE') { throw 'ECS7 uses SIMPLE recovery; SQL Server cannot take the requested transaction-log backup.' }
+
+        $cmd = $cn.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @databaseName AND type = 'D'"
+            [void]$cmd.Parameters.AddWithValue('@databaseName', 'ECS7')
+            $lastFullBackup = $cmd.ExecuteScalar()
+        } finally { $cmd.Dispose() }
+        if ($null -eq $lastFullBackup -or $lastFullBackup -is [DBNull]) {
+            throw 'No full backup of ECS7 is on record, so log maintenance was not run.'
+        }
+        $fullBackupAge = ((Get-Date) - [datetime]$lastFullBackup).TotalMinutes
+        if ($fullBackupAge -gt $fullBackupMin) {
+            throw ("The last full backup of ECS7 finished {0} minutes ago. It must be within {1} minutes before log maintenance runs." -f [int]$fullBackupAge, $fullBackupMin)
+        }
+
+        $cmd = $cn.CreateCommand()
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = "USE [ECS7]; SELECT COUNT(*) FROM sys.database_files WHERE name = @fileName AND type_desc = 'LOG'"
+            [void]$cmd.Parameters.AddWithValue('@fileName', $logicalLogName)
+            if ([int]$cmd.ExecuteScalar() -lt 1) { throw "Logical log file '$logicalLogName' was not found in database ECS7." }
+        } finally { $cmd.Dispose() }
+
+        $o.Stage = 'Log backup'
+        $escapedBackupPath = $backupPath.Replace("'", "''")
+        Invoke-NonQuery $cn "BACKUP LOG [ECS7] TO DISK = N'$escapedBackupPath';"
+        $o.BackupCompleted = $true
+
+        $o.Stage = 'Shrink'
+        Invoke-NonQuery $cn ("DBCC SHRINKFILE (N'{0}', {1});" -f $escapedLogicalLogName, $shrinkTargetMb)
+        $o.ShrinkCompleted = $true
+
+        $o.Stage = 'Growth settings'
+        Invoke-NonQuery $cn ("ALTER DATABASE [ECS7] MODIFY FILE (NAME = {0}, FILEGROWTH = {1}MB, MAXSIZE = 10240MB);" -f $quotedLogicalLogName, $growthMb)
+        $o.GrowthConfigured = $true
+
+        $o.Stage = 'Verification'
+        $cmd = $cn.CreateCommand()
+        $reader = $null
+        try {
+            $cmd.CommandTimeout = 15
+            $cmd.CommandText = @'
+USE [ECS7];
+SELECT CAST(f.size AS bigint) AS SizePages, CAST(f.growth AS bigint) AS GrowthPages,
+       CAST(f.max_size AS bigint) AS MaxSizePages, f.is_percent_growth,
+       d.log_reuse_wait_desc AS LogReuseWait
+FROM sys.database_files f
+CROSS JOIN sys.databases d
+WHERE f.name = @fileName AND f.type_desc = 'LOG' AND d.name = N'ECS7'
+'@
+            [void]$cmd.Parameters.AddWithValue('@fileName', $logicalLogName)
+            $reader = $cmd.ExecuteReader()
+            if (-not $reader.Read()) { throw "Could not find $logicalLogName while verifying the final file settings." }
+            $sizePages = [long]$reader['SizePages']
+            $growthPages = [long]$reader['GrowthPages']
+            $maxSizePages = [long]$reader['MaxSizePages']
+            $isPercentGrowth = [bool]$reader['is_percent_growth']
+            $o.LogReuseWait = [string]$reader['LogReuseWait']
+        } finally {
+            if ($reader) { $reader.Dispose() }
+            $cmd.Dispose()
+        }
+        $o.SizeMB = [Math]::Round($sizePages / 128.0, 1)
+        $o.ShrinkTargetReached = ($sizePages -le ($shrinkTargetMb * 128))
+        if ($isPercentGrowth -or $growthPages -ne ($growthMb * 128) -or $maxSizePages -ne 1310720) {
+            throw "The final file growth settings do not match the requested $growthMb MB growth and 10,240 MB maximum."
+        }
+        $o.Ok = $true
+    } catch {
+        $o.Error = " $($o.Stage) failed: $(Get-Deepest $_)".Trim()
+    } finally { if ($cn) { $cn.Dispose() } }
+    [PSCustomObject]$o
+}
 function Start-SqlCheck {
-    if ($script:SqlJob) { return }
+    if ($script:SqlJob -or $script:SqlMaintenanceJob) { return }
     $script:LastSqlCheck = Get-Date
     $known = ''
     if ($script:DbVer -and $script:DbVer.Ok -and $script:DbVer.PSObject.Properties['Database']) { $known = [string]$script:DbVer.Database }
@@ -5138,110 +6369,80 @@ function Start-SqlCheck {
         Set-SqlStatus "Could not start the SQL check: $($_.Exception.Message)" '#F38BA8'
     }
 }
+function Set-SqlMaintenanceStatus([string]$text, [string]$hex) {
+    $txtSqlMaintenanceStatus.Text = $text
+    $txtSqlMaintenanceStatus.Foreground = ColorBrush $hex
+}
+function Start-SqlMaintenance {
+    if ($script:SqlMaintenanceJob) { return }
+    if ($script:SqlJob) {
+        Set-SqlMaintenanceStatus 'Wait for the current SQL refresh to finish.' '#F9E2AF'
+        return
+    }
+    $directory = ([string]$script:SqlMaintenanceConfig['BackupDirectory']).TrimEnd('\')
+    $logName = [string]$script:SqlMaintenanceConfig['LogicalLogName']
+    $target = [int]$script:SqlMaintenanceConfig['ShrinkTargetMB']
+    $growth = [int]$script:SqlMaintenanceConfig['GrowthMB']
+    if (-not $script:SqlInfo -or -not $script:SqlInfo.Ok) {
+        Set-SqlMaintenanceStatus 'Refresh the SQL tab before running log maintenance.' '#F9E2AF'
+        return
+    }
+    $fullBackupMin = [int]$script:ShrinkConfig['FullBackupMin']
+    $fullBackupAge = Get-LastFullBackupAge
+    if ($fullBackupAge -lt 0) {
+        Set-SqlMaintenanceStatus 'No full backup of ECS7 is on record, so log maintenance is blocked.' '#F38BA8'
+        return
+    }
+    if ($fullBackupAge -gt $fullBackupMin) {
+        Set-SqlMaintenanceStatus ("The last full backup finished {0} minutes ago. It must be within {1} minutes before log maintenance runs." -f $fullBackupAge, $fullBackupMin) '#F38BA8'
+        return
+    }
+    $backupPath = "$directory\ECS7_Log.trn"
+    $confirmText = "Back up and shrink ECS7 log file '$logName' on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`nFull backup age: $fullBackupAge minutes (maximum $fullBackupMin)`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
+    $answer = [System.Windows.MessageBox]::Show($confirmText, 'Confirm ECS7 log maintenance', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($logName).AddArgument($target).AddArgument($growth).AddArgument($directory).AddArgument($fullBackupMin)
+        $script:SqlMaintenanceJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+        $btnSqlMaintenance.IsEnabled = $false
+        $btnSqlRefresh.IsEnabled = $false
+        Set-SqlMaintenanceStatus "Running backup, shrink, and file-setting verification on $($script:GuruSqlServer)..." '#89B4FA'
+    } catch {
+        $script:SqlMaintenanceJob = $null
+        $btnSqlMaintenance.IsEnabled = $true
+        $btnSqlRefresh.IsEnabled = $true
+        Set-SqlMaintenanceStatus "Could not start log maintenance: $($_.Exception.Message)" '#F38BA8'
+    }
+}
+function Complete-SqlMaintenance {
+    $job = $script:SqlMaintenanceJob
+    $script:SqlMaintenanceJob = $null
+    $btnSqlMaintenance.IsEnabled = $true
+    $btnSqlRefresh.IsEnabled = $true
+    $r = $null
+    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch   { $r = [PSCustomObject]@{ Ok = $false; BackupCompleted = $false; Error = $_.Exception.Message } }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $r) { $r = [PSCustomObject]@{ Ok = $false; BackupCompleted = $false; Error = 'The maintenance job returned no result.' } }
+    if (-not $r.Ok) {
+        $prefix = if ($r.BackupCompleted) { 'Log backup succeeded, but' } else { 'Log maintenance stopped before a successful backup:' }
+        Set-SqlMaintenanceStatus "$prefix $($r.Error)" '#F38BA8'
+        return
+    }
+    $when = (Get-Date).ToString('HH:mm:ss')
+    if ($r.ShrinkTargetReached) {
+        Set-SqlMaintenanceStatus "Completed at $when. $($r.LogicalLogName) is $($r.SizeMB) MB; $($r.ShrinkTargetMB) MB target, $($r.GrowthMB) MB growth, and 10,240 MB maximum verified." '#A6E3A1'
+    } else {
+        Set-SqlMaintenanceStatus "Backup and file settings verified at $when, but $($r.LogicalLogName) remains $($r.SizeMB) MB ($($r.ShrinkTargetMB) MB target not reached). Log reuse wait: $($r.LogReuseWait)." '#F9E2AF'
+    }
+    Start-SqlCheck
+}
 function Set-SqlStatus([string]$text, [string]$hex) { $txtSqlStatus.Text = $text; $txtSqlStatus.Foreground = ColorBrush $hex }
 function Format-Size([double]$mb) { if ($mb -ge 1024) { '{0:N1} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
 
 
-# ------------------------------------------------------------
-# SQL LOG REDUCTION (writes: the transaction log file only - never the data file, never the recovery model)
-# Runs in a background runspace. It refuses to start while a backup or restore is running, and warns first when a
-# backup finished inside the guard window (Settings tab), because shrinking can spoil a point-in-time restore of
-# the log tail that backup was going to protect.
-# ------------------------------------------------------------
-$script:ShrinkScript = {
-    param($sqlServer, $db, $logName, $targetMB, $fullBackupMin)
-    $o = [ordered]@{ Ok = $false; Error = ''; Blocked = $false; Db = $db; File = $logName; Before = 0.0; After = 0.0; TargetMB = $targetMB; LastFullMin = -1; Message = '' }
-    function Get-Deepest($err) { $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }; $e.Message }
-    function New-Conn([string]$database) {
-        $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-        $b['Data Source']            = $sqlServer
-        $b['Initial Catalog']        = $database
-        $b['Integrated Security']    = $true
-        $b['TrustServerCertificate'] = $true
-        $b['Connect Timeout']        = 10
-        $b['Application Name']       = 'EMBED Services Dashboard'
-        New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
-    }
-    function Get-Scalar($conn, [string]$sql) {
-        $cmd = $conn.CreateCommand(); $cmd.CommandTimeout = 60; $cmd.CommandText = $sql
-        $v = $cmd.ExecuteScalar()
-        if ($null -eq $v -or $v -is [DBNull]) { return $null }
-        return $v
-    }
-    $logSizeSql = "SELECT CAST(SUM(size) * 8 / 1024.0 AS decimal(12,1)) FROM sys.database_files WHERE type = 1"
-    $cn = $null
-    try {
-        if ($logName -notmatch '^[A-Za-z0-9_ .\-]+$') { throw 'The log file name has characters that are not allowed, so nothing was run.' }
-        $cn = New-Conn $db
-        $cn.Open()
-
-        # Gate 1: nothing may be backing up, restoring or shrinking right now.
-        $busy = $null
-        try { $busy = [int](Get-Scalar $cn "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE command IN ('BACKUP DATABASE','BACKUP LOG','RESTORE DATABASE','RESTORE LOG','RESTORE VERIFYONLY','DBCC SHRINKFILE')") } catch { $busy = $null }
-        if ($null -ne $busy -and $busy -gt 0) {
-            $o.Blocked = $true
-            throw 'A backup, restore or shrink is running right now. Wait for it to finish, then try again.'
-        }
-
-        # Gate 2: a FULL backup of this database must have finished within $fullBackupMin minutes. That backup is the
-        # safety net - the data is captured just before the log is disturbed. No full backup, or one older than the
-        # window, and nothing runs. Checked here as well as in the UI because time passes between the two.
-        $ageMin = $null
-        try {
-            $cmd = $cn.CreateCommand(); $cmd.CommandTimeout = 30
-            $cmd.CommandText = "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @n AND type = 'D'"
-            $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128); $p.Value = $db
-            $v = $cmd.ExecuteScalar()
-            if ($v -and $v -isnot [DBNull]) { $ageMin = ((Get-Date) - [datetime]$v).TotalMinutes }
-        } catch { $ageMin = $null }
-        if ($null -eq $ageMin) {
-            $o.Blocked = $true
-            throw ("No full backup of {0} is on record, so the log was not shrunk. Take a full backup, then try again." -f $db)
-        }
-        if ($ageMin -gt $fullBackupMin) {
-            $o.Blocked = $true
-            throw ("The last full backup of {0} finished {1} minutes ago. A full backup has to finish within {2} minutes before the log is shrunk." -f $db, [int]$ageMin, $fullBackupMin)
-        }
-        $o.LastFullMin = [int]$ageMin
-
-        $o.Before = [double](Get-Scalar $cn $logSizeSql)
-
-        # Shrink the LOG file only. No transaction: DBCC SHRINKFILE cannot run inside one.
-        # 15 minute cap: a blocked shrink must fail with a message, not sit there with the button dead forever.
-        $cmd = $cn.CreateCommand(); $cmd.CommandTimeout = 900
-        $cmd.CommandText = "CHECKPOINT; DBCC SHRINKFILE (N'$logName', $targetMB) WITH NO_INFOMSGS;"
-        try { [void]$cmd.ExecuteNonQuery() }
-        catch {
-            if ((Get-Deepest $_) -match 'Timeout|timeout') {
-                throw ("The shrink ran for 15 minutes and was stopped. The log may still be shrinking in SQL Server. Check the log size again in a few minutes; nothing was lost, the log file just could not be cut down yet.")
-            }
-            throw
-        }
-
-        $o.After = [double](Get-Scalar $cn $logSizeSql)
-        $free = $o.Before - $o.After
-        $left = ''
-        if ($o.After -gt ($targetMB + 8)) {
-            $left = " It stopped above the $targetMB MB target because SQL can only cut the log down to the part still in use (open transactions, or no log backup has run)."
-        }
-        if ($free -le 0.05) {
-            $o.Message = "The log is still $($o.After) MB - SQL Server could not free any space.$left"
-        } else {
-            $o.Message = "Log shrunk from $($o.Before) MB to $($o.After) MB (freed $([math]::Round($free, 1)) MB). Safety net: a full backup finished $($o.LastFullMin) min before this.$left"
-        }
-        $o.Ok = $true
-    } catch {
-        $o.Error = Get-Deepest $_
-    } finally { if ($cn) { $cn.Dispose() } }
-    [PSCustomObject]$o
-}
-function Format-MB([double]$mb) { if ($mb -ge 1024) { '{0:N2} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
-function Set-ShrinkStatus([string]$text, [string]$hex) { $txtShrinkStatus.Text = $text; $txtShrinkStatus.Foreground = ColorBrush $hex }
-function Get-ShrinkTargetMB {
-    $v = 0
-    if ([int]::TryParse($txtShrinkTarget.Text.Trim(), [ref]$v) -and $v -ge 16 -and $v -le 102400) { return $v }
-    return [int]$script:ShrinkConfig['TargetMB']
-}
 # Minutes since the last FULL backup, from what the SQL tab already read. -1 = no full backup on record.
 function Get-LastFullBackupAge {
     $r = $script:SqlInfo
@@ -5249,122 +6450,6 @@ function Get-LastFullBackupAge {
     if (-not $r.BkFull -or -not $r.BkFull.Finished) { return -1 }
     return [int]((Get-Date) - [datetime]$r.BkFull.Finished).TotalMinutes
 }
-function Format-Minutes([int]$m) {
-    if ($m -lt 1) { return 'just now' }
-    if ($m -lt 60) { return ('{0} min' -f $m) }
-    $h = [int][math]::Floor($m / 60); $r = $m % 60
-    if ($r -eq 0) { return ('{0} h' -f $h) }
-    return ('{0} h {1} min' -f $h, $r)
-}
-function Update-ShrinkUi {
-    $r = $script:SqlInfo
-    $can = $false; $hex = '#6C7086'
-    if (-not $r -or -not $r.Ok) {
-        $txtShrinkNow.Text = '—'
-        $text = 'Read the SQL tab first (click Refresh), then this shows what the log costs and what can be reclaimed.'
-    } elseif (-not $r.Database) {
-        $txtShrinkNow.Text = '—'
-        $text = 'No EMBED database was found, so there is no log to shrink.'
-        $hex = '#F9E2AF'
-    } else {
-        $logMB = [double]$r.LogMB
-        $usedPct = 0
-        if ($logMB -gt 0) { $usedPct = [math]::Round([double]$r.LogUsedMB / $logMB * 100, 0) }
-        $txtShrinkNow.Text = ('{0}   ({1:N0}% used)   recovery {2}' -f (Format-MB $logMB), $usedPct, $r.Recovery)
-        $target = Get-ShrinkTargetMB
-        $need   = [int]$script:ShrinkConfig['FullBackupMin']
-        $age    = Get-LastFullBackupAge
-        if ($target -ge $logMB) {
-            $text = ('The log is {0} and the target is {1}, so nothing would be reclaimed. Lower the target here or on the Settings tab.' -f (Format-MB $logMB), (Format-MB $target))
-            $hex = '#F9E2AF'
-        } elseif ($age -lt 0) {
-            $text = ('BLOCKED - no full backup of {0} is on record. Take a full backup; the shrink is then allowed for {1} minutes after it finishes.' -f $r.Database, $need)
-            $hex = '#F38BA8'
-        } elseif ($age -gt $need) {
-            $text = ('BLOCKED - the last full backup finished {0} ago, but it has to be within {1} minutes. Take a full backup, then shrink the log.' -f (Format-Minutes $age), $need)
-            $hex = '#F38BA8'
-        } else {
-            $can = $true
-            $parts = @(('Full backup finished {0} ago - the shrink is allowed.' -f (Format-Minutes $age)))
-            $parts += ('{0} down to {1} would free about {2}.' -f (Format-MB $logMB), (Format-MB $target), (Format-MB ($logMB - $target)))
-            if ($r.Recovery -and $r.Recovery -ne 'SIMPLE' -and -not $r.BkLog) {
-                $parts += ('{0} recovery with no log backups: the log will grow back after the shrink. Only the log file is ever shrunk here.' -f $r.Recovery)
-            }
-            if ($r.LogReuseWait -and $r.LogReuseWait -notin @('NOTHING', 'CHECKPOINT')) {
-                $parts += ('SQL reports the log is waiting on {0}, so it may not be able to free much.' -f $r.LogReuseWait)
-            }
-            $text = ($parts -join '  ')
-            $hex = '#A6E3A1'
-        }
-    }
-    $txtShrinkGuard.Text = $text
-    $txtShrinkGuard.Foreground = ColorBrush $hex
-    $btnShrinkLog.IsEnabled = $can
-    if ($script:ShrinkJob) { $btnShrinkLog.IsEnabled = $false }
-}
-function Start-ShrinkJob {
-    if ($script:ShrinkJob) { Set-ShrinkStatus 'A shrink is already running...' '#89B4FA'; return }
-    $r = $script:SqlInfo
-    if (-not $r -or -not $r.Ok -or -not $r.Database) { Set-ShrinkStatus 'Read the SQL tab first (click Refresh).' '#F9E2AF'; return }
-    $target = Get-ShrinkTargetMB
-    $logMB  = [double]$r.LogMB
-    if ($target -ge $logMB) { Set-ShrinkStatus 'The target is not smaller than the log, so nothing would change.' '#F9E2AF'; return }
-    $logs = @($r.Files | Where-Object { $_.FileType -eq 'LOG' })
-    if ($logs.Count -eq 0) { Set-ShrinkStatus 'The log file name could not be read, so the shrink cannot run.' '#F38BA8'; return }
-    $logName = [string](($logs | Sort-Object { [double]$_.SizeMB } -Descending | Select-Object -First 1).Name)
-    $need = [int]$script:ShrinkConfig['FullBackupMin']
-    $age  = Get-LastFullBackupAge
-    if ($age -lt 0) {
-        Set-ShrinkStatus ("No full backup of {0} is on record, so the log was not shrunk. Take a full backup, then try again." -f $r.Database) '#F38BA8'
-        return
-    }
-    if ($age -gt $need) {
-        Set-ShrinkStatus ("The last full backup finished {0} ago. A full backup has to finish within {1} minutes before the log is shrunk." -f (Format-Minutes $age), $need) '#F38BA8'
-        return
-    }
-    $more = ''
-    if ($logs.Count -gt 1) { $more = "`r`n`r`nThis database has $($logs.Count) log files; only $logName is shrunk." }
-    $ans = [System.Windows.MessageBox]::Show(
-        "Shrink the transaction log of $($r.Database) on $($script:GuruSqlServer)?`r`n`r`nFile:  $logName`r`nFrom:  $(Format-MB $logMB)`r`nTo:    $target MB`r`n`r`nSafety net: the full backup of this database finished $(Format-Minutes $age) ago.`r`n`r`nOnly the log file is touched. The data file and the recovery model are left exactly as they are.$more",
-        'Shrink transaction log', 'YesNo', 'Question')
-    if ($ans -ne 'Yes') { return }
-    try {
-        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
-        $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:ShrinkScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument([string]$r.Database).AddArgument($logName).AddArgument([int]$target).AddArgument([int]$need)
-        $script:ShrinkJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
-        $btnShrinkLog.IsEnabled = $false
-        Set-ShrinkStatus "Shrinking the log of $($r.Database)... this can take a minute on a large log." '#89B4FA'
-    } catch {
-        $script:ShrinkJob = $null
-        $btnShrinkLog.IsEnabled = $true
-        Set-ShrinkStatus "Could not start: $($_.Exception.Message)" '#F38BA8'
-    }
-}
-function Complete-ShrinkJob {
-    $job = $script:ShrinkJob
-    $script:ShrinkJob = $null
-    $r = $null
-    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
-    catch   { $r = [PSCustomObject]@{ Ok = $false; Blocked = $false; Error = $_.Exception.Message; Db = ''; File = ''; Before = 0.0; After = 0.0; Message = '' } }
-    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
-    if (-not $r) {
-        Set-ShrinkStatus 'The shrink returned nothing.' '#F38BA8'
-        $btnShrinkLog.IsEnabled = $true
-        return
-    }
-    if (-not $r.Ok) {
-        $prefix = 'Log shrink failed: '
-        if ($r.Blocked) { $prefix = 'Log shrink not started: ' }
-        Set-ShrinkStatus "$prefix$($r.Error)" '#F38BA8'
-        Add-HistoryEntry -ServiceName "Database $($r.Db)" -Group 'SQL' -OldStatus '' -NewStatus 'Log shrink stopped' -Note $r.Error
-    } else {
-        Set-ShrinkStatus $r.Message '#A6E3A1'
-        Add-HistoryEntry -ServiceName "Database $($r.Db)" -Group 'SQL' -OldStatus ("{0:N1} MB log" -f $r.Before) -NewStatus ("{0:N1} MB log" -f $r.After) -Note 'Transaction log shrunk'
-    }
-    Start-SqlCheck          # re-read sizes and the backup age
-}
-
 function Format-Age($when) {
     if (-not $when) { return '' }
     $ts = (Get-Date) - [datetime]$when
@@ -5474,7 +6559,6 @@ function Complete-SqlCheck {
 
     $msg = "Read from $($script:GuruSqlServer) at $when."
     if (@($r.Notes).Count -gt 0) { $msg += '  ' + (@($r.Notes) -join '  '); Set-SqlStatus $msg '#F9E2AF' } else { Set-SqlStatus $msg '#A6E3A1' }
-    Update-ShrinkUi
 }
 function Get-SqlTabText {
     $r = $script:SqlInfo
@@ -5496,6 +6580,7 @@ function Get-SqlTabText {
     ) -join "`r`n"
 }
 $btnSqlRefresh.Add_Click({ Start-SqlCheck })
+$btnSqlMaintenance.Add_Click({ Start-SqlMaintenance })
 $btnSqlCopy.Add_Click({
     try { [System.Windows.Clipboard]::SetText((Get-SqlTabText)); Set-SqlStatus 'SQL details copied to clipboard.' '#A6E3A1' }
     catch { Set-SqlStatus "Copy failed: $($_.Exception.Message)" '#F38BA8' }
@@ -5507,7 +6592,305 @@ $MainTabs.Add_SelectionChanged({
     if ($_.OriginalSource -ne $MainTabs) { return }
     if ($tabSql.IsSelected -and -not $script:SqlJob -and ((Get-Date) - $script:LastSqlCheck).TotalSeconds -ge 60) { Start-SqlCheck }
     if ($tabReaders.IsSelected -and -not $script:ReaderJob -and ((Get-Date) - $script:LastReaderLoad).TotalSeconds -ge 60) { Start-ReaderLoad }
+    if ($tabLogs.IsSelected -and $script:LastLogScan -eq [datetime]::MinValue -and -not $script:LogJob) { Start-LogScan }
 })
+# ------------------------------------------------------------
+# EMBED PROGRAM LOGS
+# ------------------------------------------------------------
+$script:LogJob = $null
+$script:LastLogScan = [datetime]::MinValue
+$script:LogGroups = @()
+$script:LogScript = {
+    param([string]$mode, [string]$root, [string]$path)
+    try {
+        if ($mode -eq 'Scan') {
+            if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+                return [PSCustomObject]@{ Ok = $false; Error = "Log folder not found: $root"; Files = @() }
+            }
+            $rootPrefix = $root.TrimEnd('\') + '\'
+            $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)\.(log|txt|err|out|trace|csv)(\.\d+)*$' } |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1000 | ForEach-Object {
+                    [PSCustomObject]@{
+                        Name = $_.Name
+                        FullName = $_.FullName
+                        RelativePath = $_.FullName.Substring($rootPrefix.Length)
+                        LastWriteTime = $_.LastWriteTime
+                        LengthMB = [Math]::Round($_.Length / 1MB, 1)
+                    }
+                })
+            return [PSCustomObject]@{ Ok = $true; Files = $files }
+        }
+
+        $lines = @(Get-Content -LiteralPath $path -Tail 5000 -ErrorAction Stop)
+        return [PSCustomObject]@{
+            Ok = $true; Path = $path; Text = [string]::Join([Environment]::NewLine, [string[]]$lines)
+            LineCount = $lines.Count; Truncated = ($lines.Count -ge 5000)
+        }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message; Path = $path }
+    }
+}
+$script:LogGroupDefs = @(
+    [PSCustomObject]@{ Label = 'ECSGenService'; Name = 'ECSGenService'; Pattern = '(?i)ecsgen' }
+    [PSCustomObject]@{ Label = 'EMBED API'; Name = 'EMBED API'; Pattern = '(?i)embed.?api' }
+    [PSCustomObject]@{ Label = 'ECS Reports'; Name = 'ECS Reports'; Pattern = '(?i)ecs.?reports|reports.?service' }
+    [PSCustomObject]@{ Label = 'GURU Server'; Name = 'GURU Server'; Pattern = '(?i)guru[\s._-]*server' }
+    [PSCustomObject]@{ Label = 'KIOSK Service'; Name = 'KIOSK_SERVICE'; Pattern = '(?i)kiosk.{0,20}service|service.{0,20}kiosk' }
+    [PSCustomObject]@{ Label = 'KIOSK'; Name = 'KIOSK'; Pattern = '(?i)kiosk' }
+    [PSCustomObject]@{ Label = 'SALES'; Name = 'SALES'; Pattern = '(?i)sales' }
+    [PSCustomObject]@{ Label = 'POS'; Name = 'POS'; Pattern = '' }
+    [PSCustomObject]@{ Label = 'PRIZES'; Name = 'PRIZES'; Pattern = '(?i)priz' }
+    [PSCustomObject]@{ Label = 'EPG'; Name = 'EPG'; Pattern = '(?i)epg' }
+    [PSCustomObject]@{ Label = 'Other'; Name = 'Other'; Pattern = '' }
+)
+function Initialize-LogTabs {
+    $LogProgramTabs.Items.Clear()
+    $script:LogGroups = @()
+    foreach ($definition in $script:LogGroupDefs) {
+        $group = [PSCustomObject]@{
+            Label = $definition.Label; Name = $definition.Name; Pattern = $definition.Pattern
+            Files = (New-Object System.Collections.ObjectModel.ObservableCollection[PSObject])
+            Tab = $null; List = $null; Viewer = $null; PathText = $null; Content = ''; Lines = @()
+        }
+        $tab = New-Object Windows.Controls.TabItem
+        $tab.Header = $group.Label
+        $tab.Style = $window.FindResource('SubTabItem')
+        $tab.Tag = $group
+
+        $grid = New-Object Windows.Controls.Grid
+        $grid.Background = ColorBrush '#1E1E2E'
+        $leftColumn = New-Object Windows.Controls.ColumnDefinition
+        $leftColumn.Width = New-Object Windows.GridLength(300)
+        $rightColumn = New-Object Windows.Controls.ColumnDefinition
+        $rightColumn.Width = New-Object Windows.GridLength(1, [Windows.GridUnitType]::Star)
+        $grid.ColumnDefinitions.Add($leftColumn)
+        $grid.ColumnDefinitions.Add($rightColumn)
+
+        $filePanel = New-Object Windows.Controls.DockPanel
+        $filePanel.Margin = New-Object Windows.Thickness(12, 10, 8, 10)
+        $fileHeading = New-Object Windows.Controls.TextBlock
+        $fileHeading.Text = 'LOG FILES'
+        $fileHeading.Foreground = ColorBrush '#CBA6F7'
+        $fileHeading.FontSize = 11
+        $fileHeading.FontWeight = 'SemiBold'
+        $fileHeading.Margin = New-Object Windows.Thickness(0, 0, 0, 8)
+        [Windows.Controls.DockPanel]::SetDock($fileHeading, [Windows.Controls.Dock]::Top)
+        $fileList = New-Object Windows.Controls.ListBox
+        $fileList.DisplayMemberPath = 'RelativePath'
+        $fileList.ItemsSource = $group.Files
+        $fileList.Background = ColorBrush '#181825'
+        $fileList.Foreground = ColorBrush '#CDD6F4'
+        $fileList.BorderBrush = ColorBrush '#45475A'
+        [Windows.Controls.ScrollViewer]::SetHorizontalScrollBarVisibility($fileList, [Windows.Controls.ScrollBarVisibility]::Auto)
+        $filePanel.Children.Add($fileHeading) | Out-Null
+        $filePanel.Children.Add($fileList) | Out-Null
+        [Windows.Controls.Grid]::SetColumn($filePanel, 0)
+
+        $viewPanel = New-Object Windows.Controls.DockPanel
+        $viewPanel.Margin = New-Object Windows.Thickness(8, 10, 12, 10)
+        $pathText = New-Object Windows.Controls.TextBlock
+        $pathText.Text = 'Select a log file to view its latest lines.'
+        $pathText.Foreground = ColorBrush '#6C7086'
+        $pathText.FontSize = 11
+        $pathText.TextWrapping = 'Wrap'
+        $pathText.Margin = New-Object Windows.Thickness(0, 0, 0, 8)
+        [Windows.Controls.DockPanel]::SetDock($pathText, [Windows.Controls.Dock]::Top)
+        $viewer = New-Object Windows.Controls.TextBox
+        $viewer.IsReadOnly = $true
+        $viewer.AcceptsReturn = $true
+        $viewer.AcceptsTab = $true
+        $viewer.TextWrapping = 'NoWrap'
+        $viewer.VerticalScrollBarVisibility = 'Auto'
+        $viewer.HorizontalScrollBarVisibility = 'Auto'
+        $viewer.FontFamily = 'Consolas'
+        $viewer.FontSize = 11
+        $viewer.Background = ColorBrush '#181825'
+        $viewer.Foreground = ColorBrush '#CDD6F4'
+        $viewer.BorderBrush = ColorBrush '#45475A'
+        $viewPanel.Children.Add($pathText) | Out-Null
+        $viewPanel.Children.Add($viewer) | Out-Null
+        [Windows.Controls.Grid]::SetColumn($viewPanel, 1)
+
+        $grid.Children.Add($filePanel) | Out-Null
+        $grid.Children.Add($viewPanel) | Out-Null
+        $tab.Content = $grid
+        $group.Tab = $tab
+        $group.List = $fileList
+        $group.Viewer = $viewer
+        $group.PathText = $pathText
+        $fileList.Tag = $group
+        $fileList.Add_SelectionChanged({
+            if ($this.SelectedItem) { Start-LogRead $this.Tag ([string]$this.SelectedItem.FullName) }
+        })
+        $script:LogGroups += $group
+        $LogProgramTabs.Items.Add($tab) | Out-Null
+    }
+}
+function Start-LogOperation([string]$Mode, $Group, [string]$Path) {
+    if ($script:LogJob) {
+        $txtLogStatus.Text = 'A log operation is already running.'
+        return
+    }
+    $rs = $null
+    $ps = $null
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript($script:LogScript.ToString()).AddArgument($Mode).AddArgument([string]$script:LogRoot).AddArgument($Path)
+        $script:LogJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Mode = $Mode; Group = $Group; Path = $Path }
+        if ($Mode -eq 'Scan') {
+            $btnLogRefresh.IsEnabled = $false
+            $txtLogStatus.Text = "Scanning $($script:LogRoot)..."
+        } else {
+            foreach ($item in $script:LogGroups) { $item.List.IsEnabled = $false }
+            $txtLogStatus.Text = "Reading $([IO.Path]::GetFileName($Path))..."
+        }
+    } catch {
+        $script:LogJob = $null
+        if ($ps) { $ps.Dispose() }
+        if ($rs) { if ($rs.RunspaceStateInfo.State -eq 'Opened') { $rs.Close() }; $rs.Dispose() }
+        $btnLogRefresh.IsEnabled = $true
+        foreach ($item in $script:LogGroups) { $item.List.IsEnabled = $true }
+        $txtLogStatus.Text = "Could not start log operation: $($_.Exception.Message)"
+    }
+}
+function Start-LogScan { Start-LogOperation 'Scan' $null '' }
+function Start-LogRead($Group, [string]$Path) { Start-LogOperation 'Read' $Group $Path }
+function Complete-LogOperation {
+    $job = $script:LogJob
+    $script:LogJob = $null
+    $btnLogRefresh.IsEnabled = $true
+    foreach ($item in $script:LogGroups) { $item.List.IsEnabled = $true }
+    $result = $null
+    try { $result = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
+    catch { $result = [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
+    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
+    if (-not $result) { $txtLogStatus.Text = 'The log operation returned no result.'; return }
+    if (-not $result.Ok) { $txtLogStatus.Text = "Log operation failed: $($result.Error)"; return }
+
+    if ($job.Mode -eq 'Scan') {
+        foreach ($group in $script:LogGroups) { $group.Files.Clear() }
+        foreach ($file in @($result.Files)) {
+            $target = $null
+            foreach ($group in $script:LogGroups) {
+                if ($group.Name -eq 'Other') { continue }
+                $matchesGroup = $false
+                if ($group.Name -eq 'POS') {
+                    $matchesGroup = ($file.Name -match '(?i)^pos') -or
+                        ($file.RelativePath -match '(?i)(^|[\\/._ -])pos([\\/._ -]|$)|point.?of.?sale')
+                } else {
+                    $matchesGroup = $file.RelativePath -match $group.Pattern
+                }
+                if ($matchesGroup) { $target = $group; break }
+            }
+            if (-not $target) { $target = $script:LogGroups | Where-Object { $_.Name -eq 'Other' } | Select-Object -First 1 }
+            if ($target) { $target.Files.Add($file) }
+        }
+        foreach ($group in $script:LogGroups) {
+            $group.Tab.Header = '{0} ({1})' -f $group.Label, $group.Files.Count
+        }
+        $script:LastLogScan = Get-Date
+        $count = @($result.Files).Count
+        if ($count -eq 0) {
+            $txtLogStatus.Text = "No supported text log files found in $($script:LogRoot)."
+        } else {
+            $txtLogStatus.Text = "Found $count log file(s) in $($script:LogRoot). Select a program and file; previews show up to the latest 5,000 lines."
+        }
+        return
+    }
+
+    $group = $job.Group
+    $group.Content = [string]$result.Text
+    $group.Lines = @(ConvertTo-LogLines $group.Content)
+    $tailNote = if ($result.Truncated) { ' (showing the latest 5,000 lines)' } else { '' }
+    $fileName = [IO.Path]::GetFileName([string]$result.Path)
+    $group.PathText.Text = "${fileName}  |  $([string]$result.Path)$tailNote"
+    Update-LogFilter $group
+}
+function ConvertTo-LogLines([string]$Text) {
+    $timestampPattern = '(?<!\d)(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{1,2}/\d{1,2}/\d{4}[ T]\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?)(?!\d)'
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($line in ($Text -split "`r?`n")) {
+        $timestamp = $null
+        $timestampMatch = [regex]::Match($line, $timestampPattern)
+        if ($timestampMatch.Success) {
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParse($timestampMatch.Value, [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+                $timestamp = $parsed
+            }
+        }
+        $severity = 'Other'
+        if ($line -match '(?i)\b(error|err|fatal|critical|exception|fail(?:ed|ure)?)\b') { $severity = 'Error' }
+        elseif ($line -match '(?i)\b(warn(?:ing)?|wrn)\b') { $severity = 'Warning' }
+        [void]$entries.Add([PSCustomObject]@{ Text = $line; Timestamp = $timestamp; Severity = $severity })
+    }
+    return $entries.ToArray()
+}
+function Update-LogFilter($Group) {
+    if (-not $Group) {
+        $tab = $LogProgramTabs.SelectedItem
+        if (-not $tab -or -not $tab.Tag) { return }
+        $Group = $tab.Tag
+    }
+    if (-not $Group.Content) { return }
+    $severityFilter = 'All'
+    if ($cmbLogSeverity.SelectedItem) { $severityFilter = [string]$cmbLogSeverity.SelectedItem.Tag }
+    $timeFilter = 'All'
+    if ($cmbLogTime.SelectedItem) { $timeFilter = [string]$cmbLogTime.SelectedItem.Tag }
+    $now = Get-Date
+    $visible = @($Group.Lines | Where-Object {
+        $entry = $_
+        $severityMatch = $true
+        if ($severityFilter -eq 'Error') { $severityMatch = ($entry.Severity -eq 'Error') }
+        elseif ($severityFilter -eq 'Warning') { $severityMatch = ($entry.Severity -eq 'Warning') }
+        elseif ($severityFilter -eq 'ErrorWarning') { $severityMatch = ($entry.Severity -in @('Error', 'Warning')) }
+        $timeMatch = $true
+        if ($timeFilter -ne 'All') {
+            $timeMatch = $false
+            if ($null -ne $entry.Timestamp) {
+                switch ($timeFilter) {
+                    'Hour' { $timeMatch = $entry.Timestamp -ge $now.AddHours(-1) }
+                    'Day' { $timeMatch = $entry.Timestamp -ge $now.AddHours(-24) }
+                    'Today' { $timeMatch = $entry.Timestamp.Date -eq $now.Date }
+                }
+            }
+        }
+        $severityMatch -and $timeMatch
+    })
+    $Group.Viewer.Text = [string]::Join([Environment]::NewLine, [string[]]@($visible | ForEach-Object { $_.Text }))
+    $Group.Viewer.CaretIndex = 0
+    $Group.Viewer.ScrollToHome()
+    $timestampCount = @($Group.Lines | Where-Object { $null -ne $_.Timestamp }).Count
+    $errorCount = @($Group.Lines | Where-Object { $_.Severity -eq 'Error' }).Count
+    $warningCount = @($Group.Lines | Where-Object { $_.Severity -eq 'Warning' }).Count
+    $txtLogStatus.Text = "Showing $($visible.Count) of $($Group.Lines.Count) lines; detected $timestampCount timestamps, $errorCount errors, and $warningCount warnings."
+}
+function Find-LogText {
+    $query = $txtLogSearch.Text
+    if (-not $query) { $txtLogStatus.Text = 'Enter text to find in the selected log.'; return }
+    $tab = $LogProgramTabs.SelectedItem
+    if (-not $tab -or -not $tab.Tag -or -not $tab.Tag.Content) { $txtLogStatus.Text = 'Select and load a log file first.'; return }
+    $viewer = $tab.Tag.Viewer
+    $start = $viewer.SelectionStart + [Math]::Max(1, $viewer.SelectionLength)
+    if ($start -ge $viewer.Text.Length) { $start = 0 }
+    $index = $viewer.Text.IndexOf($query, $start, [StringComparison]::OrdinalIgnoreCase)
+    if ($index -lt 0 -and $start -gt 0) { $index = $viewer.Text.IndexOf($query, 0, [StringComparison]::OrdinalIgnoreCase) }
+    if ($index -lt 0) { $txtLogStatus.Text = "'$query' was not found in the displayed log lines."; return }
+    $viewer.Focus()
+    $viewer.Select($index, $query.Length)
+    $viewer.ScrollToLine($viewer.GetLineIndexFromCharacterIndex($index))
+    $lineNumber = $viewer.GetLineIndexFromCharacterIndex($index) + 1
+    $txtLogStatus.Text = "Found '$query' on displayed line $lineNumber."
+}
+$btnLogRefresh.Add_Click({ Start-LogScan })
+$btnLogFind.Add_Click({ Find-LogText })
+$cmbLogSeverity.Add_SelectionChanged({ Update-LogFilter })
+$cmbLogTime.Add_SelectionChanged({ Update-LogFilter })
+$txtLogSearch.Add_KeyDown({ if ($_.Key -eq 'Return') { Find-LogText } })
 # ------------------------------------------------------------
 # READERS TAB (swiper units + reader units) - read-only
 # Swiper_Units -> Game_Swipers (Game_Id) for the description and retired flag (Game_Master_List for the game's retired flag).
@@ -5988,9 +7371,11 @@ $script:Timer.Add_Tick({
     if ($script:UpdateScan -and $script:UpdateScan.Handle.IsCompleted) { Complete-UpdateCheck }
     if ($script:SnapshotJob -and $script:SnapshotJob.Handle.IsCompleted) { Complete-Snapshot }
     if ($script:RemoteJob   -and $script:RemoteJob.Handle.IsCompleted)   { Complete-RemoteJob }
+    if ($script:RemoteAdminJob -and $script:RemoteAdminJob.Handle.IsCompleted) { Complete-RemoteAdminTask }
     if ($script:DbVerJob    -and $script:DbVerJob.Handle.IsCompleted)    { Complete-DbVersionCheck }
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
-    if ($script:ShrinkJob   -and $script:ShrinkJob.Handle.IsCompleted)   { Complete-ShrinkJob }
+    if ($script:LogJob      -and $script:LogJob.Handle.IsCompleted)      { Complete-LogOperation }
+    if ($script:SqlMaintenanceJob -and $script:SqlMaintenanceJob.Handle.IsCompleted) { Complete-SqlMaintenance }
     if ($script:LoginJob    -and $script:LoginJob.Handle.IsCompleted)    { Complete-LoginJob }
     if ($script:ReaderJob   -and $script:ReaderJob.Handle.IsCompleted)   { Complete-ReaderLoad }
     if ($script:RdPingJob   -and $script:RdPingJob.Handle.IsCompleted)   { Complete-ReaderPing }
@@ -6012,9 +7397,7 @@ $script:Timer.Add_Tick({
     if ((-not $script:UpdateScan) -and $script:UpdateConfig['AutoCheck'] -and ([string]$script:UpdateConfig['Repo']) -and (((Get-Date) - $script:LastUpdateCheck).TotalHours -ge 6)) {
         Start-UpdateCheck ([bool]$script:UpdateConfig['AutoInstall'])
     }
-    $script:CountdownSecs--
-    if ($script:CountdownSecs -le 0) {
-        $script:CountdownSecs = $script:RefreshSecs
+    if ([datetime]::Now -ge $script:NextServiceRefresh) {
         Set-StatusColor 'Updating'
         Set-TrayIconColor 'Updating'
         $statusBar.Text = "Refreshing services..."
@@ -6037,11 +7420,12 @@ $script:Timer.Add_Tick({
         Set-StatusColor 'Healthy'
         Set-TrayIconColor 'Healthy'
     }
-    $txtCountdown.Text = Format-Countdown $script:CountdownSecs
 })
 # ------------------------------------------------------------
 # INITIALIZE UI
 # ------------------------------------------------------------
+Remove-OldHistoryLogs
+Load-History
 Build-ServiceRows
 Apply-Filter 'All'
 Update-AllServices
@@ -6051,14 +7435,11 @@ Set-TrayIconColor 'Healthy'
 $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
-Initialize-TimerUi
-Initialize-MaintUi
-Update-ShrinkUi
+Initialize-LogTabs
 Start-DbVersionCheck
 Initialize-ApUi
 if ($script:ApList.Count -gt 0) { Start-ApJob $false } else { Start-ApJob $true }   # first run finds the APs
 [void](Remove-OldSnapshots)
-Remove-OldHistoryLogs
 $script:Timer.Start()
 # ------------------------------------------------------------
 # SHOW WINDOW

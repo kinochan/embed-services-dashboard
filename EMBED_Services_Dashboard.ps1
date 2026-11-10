@@ -80,6 +80,7 @@ v2.25: Combines the v2.23.11 station snapshots, software deployment, CenterEdge 
     transaction-log reduction with the v2.22.15 Event Viewer, remote-admin tasks, program-log viewer, and
     per-service CPU, memory, and disk-rate monitoring, including AnyDesk service monitoring. History entries
     reload from retained daily CSV logs when the dashboard starts.
+    v2.25.2: Minor fixes and improvements to station snapshot and log handling. Also removed duplicate sql log entries.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
