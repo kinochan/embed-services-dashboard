@@ -96,7 +96,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.25.1'
+$script:AppVersion = '2.25.2'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -180,7 +180,6 @@ $script:SnapshotConfig = @{ KeepCount = 5; MaxAgeDays = 14; StationLogs = 5 }   
 $script:SnapshotJob    = $null
 # v2.23: SQL log reduction (saved to config.json)
 $script:ShrinkConfig   = @{ TargetMB = 256; FullBackupMin = 30 }   # shrink only after a FULL backup this recent
-$script:ShrinkJob      = $null
 $script:SsConfig       = @{ TypeOverride = 'Auto' }                       # station log type: Auto, Kiosk, RedPOS or RedPro (saved)
 $script:RemoteJob      = $null
 $script:RemoteList     = New-Object System.Collections.ObjectModel.ObservableCollection[PSObject]
@@ -733,7 +732,7 @@ function Save-Config {
           <Border Grid.Row="0" Background="#181825" Padding="16,9">
             <Grid>
               <TextBlock x:Name="txtSqlStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,200,0"
-                         Text="EMBED database status. Refreshes when you open this tab and every 24 hours. Two parts write: Support Login (logins) and Log Reduction (the log file only)."/>
+                         Text="EMBED database status. Refreshes when you open this tab and every 24 hours. Support Login and log file maintenance modify the database."/>
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="btnSqlCopy"    Content="Copy"       Style="{StaticResource BtnBase}" Margin="0,0,6,0" ToolTip="Copy everything on this tab for a ticket"/>
                 <Button x:Name="btnSqlRefresh" Content="↻  Refresh" Style="{StaticResource BtnBlue}"/>
@@ -858,37 +857,6 @@ function Save-Config {
                                         <Button x:Name="btnSqlMaintenance" Grid.Column="0" Content="Backup + Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,10,0" ToolTip="Back up and shrink the ECS7 transaction log, then set and verify file growth limits."/>
                                         <TextBlock x:Name="txtSqlMaintenanceStatus" Grid.Column="1" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
                                     </Grid>
-                </StackPanel>
-              </Border>
-              <!-- Log reduction (writes: the transaction log file only) -->
-              <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,0,0,12">
-                <StackPanel>
-                  <TextBlock Text="LOG REDUCTION" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                  <TextBlock Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"
-                             Text="Shrinks the transaction log file only. The data file and the recovery model are never changed. It is blocked unless a FULL backup of this database finished within the window on the Settings tab, and it never runs while a backup is in progress."/>
-                  <Grid>
-                    <Grid.ColumnDefinitions>
-                      <ColumnDefinition Width="130"/>
-                      <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <Grid.RowDefinitions>
-                      <RowDefinition Height="Auto"/>
-                      <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Transaction log" Foreground="#6C7086" Margin="0,0,14,8" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="txtShrinkNow" Grid.Row="0" Grid.Column="1" Text="—" Foreground="#CDD6F4" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,8" TextWrapping="Wrap"/>
-                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Shrink target" Foreground="#6C7086" VerticalAlignment="Center"/>
-                    <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal">
-                      <TextBox x:Name="txtShrinkTarget" Width="80" Margin="0,0,6,0" ToolTip="Megabytes to shrink the log file down to. The default comes from the Settings tab."/>
-                      <TextBlock Text="MB" Foreground="#6C7086" VerticalAlignment="Center"/>
-                    </StackPanel>
-                  </Grid>
-                  <TextBlock x:Name="txtShrinkGuard" Foreground="#6C7086" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
-                  <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                    <Button x:Name="btnShrinkLog"     Content="Shrink Log" Style="{StaticResource BtnYellow}" Margin="0,0,6,0" ToolTip="Blocked unless a full backup finished within the window on the Settings tab. Runs CHECKPOINT then DBCC SHRINKFILE on the log file only."/>
-                    <Button x:Name="btnShrinkRefresh" Content="Re-check"   Style="{StaticResource BtnBase}"   Margin="0,0,12,0"/>
-                    <TextBlock x:Name="txtShrinkStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
-                  </StackPanel>
                 </StackPanel>
               </Border>
               <!-- SQL Server -->
@@ -1538,6 +1506,7 @@ function Save-Config {
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
                                     <TextBlock Grid.Row="0" Text="Logical log file name" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
                                     <TextBox x:Name="txtSqlLogicalLogName" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="SQL logical file name, for example ECS7_log or ECS7_Seabrook_Log"/>
@@ -1547,6 +1516,8 @@ function Save-Config {
                                     <TextBox x:Name="txtSqlGrowthMb" Grid.Row="2" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="1 to 10240 MB"/>
                                     <TextBlock Grid.Row="3" Text="Backup directory (SQL Server)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
                                     <TextBox x:Name="txtSqlBackupDirectory" Grid.Row="3" Grid.Column="1" HorizontalAlignment="Stretch" Margin="0,0,0,10" ToolTip="Absolute drive path or UNC directory on the SQL Server host"/>
+                                    <TextBlock Grid.Row="4" Text="Maximum full backup age (minutes)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10" TextWrapping="Wrap"/>
+                                    <TextBox x:Name="txtSqlFullBackupAge" Grid.Row="4" Grid.Column="1" Width="100" HorizontalAlignment="Left" Margin="0,0,0,10" ToolTip="A full backup must have finished within this many minutes. 5 to 1440."/>
                                 </Grid>
                                 <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                     <Button x:Name="btnSqlMaintenanceSave" Content="Save Log Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
@@ -1647,37 +1618,6 @@ function Save-Config {
                   <Button x:Name="btnSnapSave" Content="Save Snapshot Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
                   <Button x:Name="btnSnapOpen" Content="Open Snapshot Folder"   Style="{StaticResource BtnBlue}"/>
                   <TextBlock x:Name="txtSnapStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="14,0,0,0"/>
-                </StackPanel>
-              </StackPanel>
-            </Border>
-            <Border Background="#313244" CornerRadius="8" Padding="18" Margin="0,14,0,0">
-              <StackPanel>
-                <TextBlock Text="SQL MAINTENANCE" Foreground="#CBA6F7" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                <TextBlock Text="Log reduction only ever shrinks the transaction log file - it never changes the data file or the recovery model."
-                           Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
-                <Grid>
-                  <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="300"/>
-                    <ColumnDefinition Width="*"/>
-                  </Grid.ColumnDefinitions>
-                  <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                  </Grid.RowDefinitions>
-                  <TextBlock Grid.Row="0" Text="Shrink the log down to (MB)" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
-                    <TextBox x:Name="txtSetShrinkTarget" Width="80"/>
-                    <TextBlock Text="What the log shrinks to - it cannot go below the log actually in use." Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                  </StackPanel>
-                  <TextBlock Grid.Row="1" Text="Only shrink if a FULL backup is at most (minutes) old" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                  <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
-                    <TextBox x:Name="txtSetShrinkGuard" Width="80"/>
-                    <TextBlock Text="No full backup this fresh = Shrink Log stays blocked. 5 to 1440." Foreground="#6C7086" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                  </StackPanel>
-                </Grid>
-                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                  <Button x:Name="btnMaintSave" Content="Save Maintenance Settings" Style="{StaticResource BtnPurple}" Margin="0,0,8,0"/>
-                  <TextBlock x:Name="txtMaintStatus" Foreground="#6C7086" FontSize="12" VerticalAlignment="Center" Margin="6,0,0,0"/>
                 </StackPanel>
               </StackPanel>
             </Border>
@@ -1872,6 +1812,7 @@ $txtSqlShrinkTarget = Get-Ctrl 'txtSqlShrinkTarget'
 $txtSqlLogicalLogName = Get-Ctrl 'txtSqlLogicalLogName'
 $txtSqlGrowthMb = Get-Ctrl 'txtSqlGrowthMb'
 $txtSqlBackupDirectory = Get-Ctrl 'txtSqlBackupDirectory'
+$txtSqlFullBackupAge = Get-Ctrl 'txtSqlFullBackupAge'
 $txtSqlMaintenancePlan = Get-Ctrl 'txtSqlMaintenancePlan'
 $btnSqlMaintenance = Get-Ctrl 'btnSqlMaintenance'
 $txtSqlMaintenanceStatus = Get-Ctrl 'txtSqlMaintenanceStatus'
@@ -1990,18 +1931,6 @@ $btnApSave        = Get-Ctrl 'btnApSave'
 $dgAps            = Get-Ctrl 'dgAps'
 $btnApPingWin     = Get-Ctrl 'btnApPingWin'
 $btnApForget      = Get-Ctrl 'btnApForget'
-# v2.23 controls: SQL log reduction
-$txtShrinkNow     = Get-Ctrl 'txtShrinkNow'
-$txtShrinkTarget  = Get-Ctrl 'txtShrinkTarget'
-$txtShrinkGuard   = Get-Ctrl 'txtShrinkGuard'
-$txtShrinkStatus  = Get-Ctrl 'txtShrinkStatus'
-$btnShrinkLog     = Get-Ctrl 'btnShrinkLog'
-$btnShrinkRefresh = Get-Ctrl 'btnShrinkRefresh'
-# v2.23 controls: Settings tab maintenance
-$txtSetShrinkTarget = Get-Ctrl 'txtSetShrinkTarget'
-$txtSetShrinkGuard  = Get-Ctrl 'txtSetShrinkGuard'
-$btnMaintSave       = Get-Ctrl 'btnMaintSave'
-$txtMaintStatus     = Get-Ctrl 'txtMaintStatus'
 #Dev Buttons
 $btnDevRemoteAdmin = New-Object System.Windows.Controls.Button   # triggered from the expanded device row
 
@@ -4091,6 +4020,7 @@ function Initialize-SqlMaintenanceUi {
     $txtSqlShrinkTarget.Text = [string]$script:SqlMaintenanceConfig['ShrinkTargetMB']
     $txtSqlGrowthMb.Text = [string]$script:SqlMaintenanceConfig['GrowthMB']
     $txtSqlBackupDirectory.Text = [string]$script:SqlMaintenanceConfig['BackupDirectory']
+    $txtSqlFullBackupAge.Text = [string]$script:ShrinkConfig['FullBackupMin']
     Update-SqlMaintenancePlan
 }
 Initialize-SqlMaintenanceUi
@@ -4121,10 +4051,16 @@ $btnSqlMaintenanceSave.Add_Click({
         Set-SqlMaintenanceSettingsStatus 'Enter an absolute drive or UNC directory on the SQL Server host.' '#F38BA8'
         return
     }
+    $fullBackupAge = 0
+    if (-not [int]::TryParse($txtSqlFullBackupAge.Text.Trim(), [ref]$fullBackupAge) -or $fullBackupAge -lt 5 -or $fullBackupAge -gt 1440) {
+        Set-SqlMaintenanceSettingsStatus 'Full backup age must be a whole number from 5 to 1440 minutes.' '#F38BA8'
+        return
+    }
     $script:SqlMaintenanceConfig['LogicalLogName'] = $logName
     $script:SqlMaintenanceConfig['ShrinkTargetMB'] = $target
     $script:SqlMaintenanceConfig['GrowthMB'] = $growth
     $script:SqlMaintenanceConfig['BackupDirectory'] = $directory
+    $script:ShrinkConfig['FullBackupMin'] = $fullBackupAge
     Save-AllConfig
     Update-SqlMaintenancePlan
     Set-SqlMaintenanceSettingsStatus ("Saved at {0}. Backup file: ECS7_Log.trn." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
@@ -6172,26 +6108,6 @@ function Apply-DeviceInterval {
 $txtDevEvery.Add_KeyDown({ if ($_.Key -eq 'Return') { Apply-DeviceInterval } })
 $txtDevEvery.Add_LostFocus({ Apply-DeviceInterval })
 # ------------------------------------------------------------
-# SETTINGS TAB: SQL MAINTENANCE (log shrink target + the full backup gate)
-# ------------------------------------------------------------
-function Set-MaintStatus([string]$text, [string]$hex) { $txtMaintStatus.Text = $text; $txtMaintStatus.Foreground = ColorBrush $hex }
-function Initialize-MaintUi {
-    $txtSetShrinkTarget.Text = [string]$script:ShrinkConfig['TargetMB']
-    $txtSetShrinkGuard.Text  = [string]$script:ShrinkConfig['FullBackupMin']
-}
-$btnMaintSave.Add_Click({
-    $t = 0; $g = 0
-    if (-not [int]::TryParse($txtSetShrinkTarget.Text.Trim(), [ref]$t) -or $t -lt 16 -or $t -gt 102400) { Set-MaintStatus 'Shrink target: 16 to 102400 MB.' '#F38BA8'; return }
-    if (-not [int]::TryParse($txtSetShrinkGuard.Text.Trim(), [ref]$g) -or $g -lt 5 -or $g -gt 1440)       { Set-MaintStatus 'Full backup age: 5 to 1440 minutes.' '#F38BA8'; return }
-    $script:ShrinkConfig['TargetMB'] = $t
-    $script:ShrinkConfig['FullBackupMin'] = $g
-    Save-AllConfig
-    Initialize-MaintUi
-    Update-ShrinkUi
-    Set-MaintStatus ("Saved at {0}." -f (Get-Date).ToString('HH:mm:ss')) '#A6E3A1'
-})
-
-# ------------------------------------------------------------
 # SQL TAB (backups, file sizes, database version) - read-only
 # ------------------------------------------------------------
 $script:SqlScript = {
@@ -6526,106 +6442,6 @@ function Set-SqlStatus([string]$text, [string]$hex) { $txtSqlStatus.Text = $text
 function Format-Size([double]$mb) { if ($mb -ge 1024) { '{0:N1} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
 
 
-# ------------------------------------------------------------
-# SQL LOG REDUCTION (writes: the transaction log file only - never the data file, never the recovery model)
-# Runs in a background runspace. It refuses to start while a backup or restore is running, and warns first when a
-# backup finished inside the guard window (Settings tab), because shrinking can spoil a point-in-time restore of
-# the log tail that backup was going to protect.
-# ------------------------------------------------------------
-$script:ShrinkScript = {
-    param($sqlServer, $db, $logName, $targetMB, $fullBackupMin)
-    $o = [ordered]@{ Ok = $false; Error = ''; Blocked = $false; Db = $db; File = $logName; Before = 0.0; After = 0.0; TargetMB = $targetMB; LastFullMin = -1; Message = '' }
-    function Get-Deepest($err) { $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }; $e.Message }
-    function New-Conn([string]$database) {
-        $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-        $b['Data Source']            = $sqlServer
-        $b['Initial Catalog']        = $database
-        $b['Integrated Security']    = $true
-        $b['TrustServerCertificate'] = $true
-        $b['Connect Timeout']        = 10
-        $b['Application Name']       = 'EMBED Services Dashboard'
-        New-Object System.Data.SqlClient.SqlConnection $b.ConnectionString
-    }
-    function Get-Scalar($conn, [string]$sql) {
-        $cmd = $conn.CreateCommand(); $cmd.CommandTimeout = 60; $cmd.CommandText = $sql
-        $v = $cmd.ExecuteScalar()
-        if ($null -eq $v -or $v -is [DBNull]) { return $null }
-        return $v
-    }
-    $logSizeSql = "SELECT CAST(SUM(size) * 8 / 1024.0 AS decimal(12,1)) FROM sys.database_files WHERE type = 1"
-    $cn = $null
-    try {
-        if ($logName -notmatch '^[A-Za-z0-9_ .\-]+$') { throw 'The log file name has characters that are not allowed, so nothing was run.' }
-        $cn = New-Conn $db
-        $cn.Open()
-
-        # Gate 1: nothing may be backing up, restoring or shrinking right now.
-        $busy = $null
-        try { $busy = [int](Get-Scalar $cn "SELECT COUNT(*) FROM sys.dm_exec_requests WHERE command IN ('BACKUP DATABASE','BACKUP LOG','RESTORE DATABASE','RESTORE LOG','RESTORE VERIFYONLY','DBCC SHRINKFILE')") } catch { $busy = $null }
-        if ($null -ne $busy -and $busy -gt 0) {
-            $o.Blocked = $true
-            throw 'A backup, restore or shrink is running right now. Wait for it to finish, then try again.'
-        }
-
-        # Gate 2: a FULL backup of this database must have finished within $fullBackupMin minutes. That backup is the
-        # safety net - the data is captured just before the log is disturbed. No full backup, or one older than the
-        # window, and nothing runs. Checked here as well as in the UI because time passes between the two.
-        $ageMin = $null
-        try {
-            $cmd = $cn.CreateCommand(); $cmd.CommandTimeout = 30
-            $cmd.CommandText = "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @n AND type = 'D'"
-            $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128); $p.Value = $db
-            $v = $cmd.ExecuteScalar()
-            if ($v -and $v -isnot [DBNull]) { $ageMin = ((Get-Date) - [datetime]$v).TotalMinutes }
-        } catch { $ageMin = $null }
-        if ($null -eq $ageMin) {
-            $o.Blocked = $true
-            throw ("No full backup of {0} is on record, so the log was not shrunk. Take a full backup, then try again." -f $db)
-        }
-        if ($ageMin -gt $fullBackupMin) {
-            $o.Blocked = $true
-            throw ("The last full backup of {0} finished {1} minutes ago. A full backup has to finish within {2} minutes before the log is shrunk." -f $db, [int]$ageMin, $fullBackupMin)
-        }
-        $o.LastFullMin = [int]$ageMin
-
-        $o.Before = [double](Get-Scalar $cn $logSizeSql)
-
-        # Shrink the LOG file only. No transaction: DBCC SHRINKFILE cannot run inside one.
-        # 15 minute cap: a blocked shrink must fail with a message, not sit there with the button dead forever.
-        $cmd = $cn.CreateCommand(); $cmd.CommandTimeout = 900
-        $cmd.CommandText = "CHECKPOINT; DBCC SHRINKFILE (N'$logName', $targetMB) WITH NO_INFOMSGS;"
-        try { [void]$cmd.ExecuteNonQuery() }
-        catch {
-            if ((Get-Deepest $_) -match 'Timeout|timeout') {
-                throw ("The shrink ran for 15 minutes and was stopped. The log may still be shrinking in SQL Server. Check the log size again in a few minutes; nothing was lost, the log file just could not be cut down yet.")
-            }
-            throw
-        }
-
-        $o.After = [double](Get-Scalar $cn $logSizeSql)
-        $free = $o.Before - $o.After
-        $left = ''
-        if ($o.After -gt ($targetMB + 8)) {
-            $left = " It stopped above the $targetMB MB target because SQL can only cut the log down to the part still in use (open transactions, or no log backup has run)."
-        }
-        if ($free -le 0.05) {
-            $o.Message = "The log is still $($o.After) MB - SQL Server could not free any space.$left"
-        } else {
-            $o.Message = "Log shrunk from $($o.Before) MB to $($o.After) MB (freed $([math]::Round($free, 1)) MB). Safety net: a full backup finished $($o.LastFullMin) min before this.$left"
-        }
-        $o.Ok = $true
-    } catch {
-        $o.Error = Get-Deepest $_
-    } finally { if ($cn) { $cn.Dispose() } }
-    [PSCustomObject]$o
-}
-function Format-MB([double]$mb) { if ($mb -ge 1024) { '{0:N2} GB' -f ($mb / 1024) } else { '{0:N0} MB' -f $mb } }
-function Set-ShrinkStatus([string]$text, [string]$hex) { $txtShrinkStatus.Text = $text; $txtShrinkStatus.Foreground = ColorBrush $hex }
-function Get-ShrinkTargetMB {
-    $v = 0
-    if ([int]::TryParse($txtShrinkTarget.Text.Trim(), [ref]$v) -and $v -ge 16 -and $v -le 102400) { return $v }
-    return [int]$script:ShrinkConfig['TargetMB']
-}
 # Minutes since the last FULL backup, from what the SQL tab already read. -1 = no full backup on record.
 function Get-LastFullBackupAge {
     $r = $script:SqlInfo
@@ -6633,122 +6449,6 @@ function Get-LastFullBackupAge {
     if (-not $r.BkFull -or -not $r.BkFull.Finished) { return -1 }
     return [int]((Get-Date) - [datetime]$r.BkFull.Finished).TotalMinutes
 }
-function Format-Minutes([int]$m) {
-    if ($m -lt 1) { return 'just now' }
-    if ($m -lt 60) { return ('{0} min' -f $m) }
-    $h = [int][math]::Floor($m / 60); $r = $m % 60
-    if ($r -eq 0) { return ('{0} h' -f $h) }
-    return ('{0} h {1} min' -f $h, $r)
-}
-function Update-ShrinkUi {
-    $r = $script:SqlInfo
-    $can = $false; $hex = '#6C7086'
-    if (-not $r -or -not $r.Ok) {
-        $txtShrinkNow.Text = '—'
-        $text = 'Read the SQL tab first (click Refresh), then this shows what the log costs and what can be reclaimed.'
-    } elseif (-not $r.Database) {
-        $txtShrinkNow.Text = '—'
-        $text = 'No EMBED database was found, so there is no log to shrink.'
-        $hex = '#F9E2AF'
-    } else {
-        $logMB = [double]$r.LogMB
-        $usedPct = 0
-        if ($logMB -gt 0) { $usedPct = [math]::Round([double]$r.LogUsedMB / $logMB * 100, 0) }
-        $txtShrinkNow.Text = ('{0}   ({1:N0}% used)   recovery {2}' -f (Format-MB $logMB), $usedPct, $r.Recovery)
-        $target = Get-ShrinkTargetMB
-        $need   = [int]$script:ShrinkConfig['FullBackupMin']
-        $age    = Get-LastFullBackupAge
-        if ($target -ge $logMB) {
-            $text = ('The log is {0} and the target is {1}, so nothing would be reclaimed. Lower the target here or on the Settings tab.' -f (Format-MB $logMB), (Format-MB $target))
-            $hex = '#F9E2AF'
-        } elseif ($age -lt 0) {
-            $text = ('BLOCKED - no full backup of {0} is on record. Take a full backup; the shrink is then allowed for {1} minutes after it finishes.' -f $r.Database, $need)
-            $hex = '#F38BA8'
-        } elseif ($age -gt $need) {
-            $text = ('BLOCKED - the last full backup finished {0} ago, but it has to be within {1} minutes. Take a full backup, then shrink the log.' -f (Format-Minutes $age), $need)
-            $hex = '#F38BA8'
-        } else {
-            $can = $true
-            $parts = @(('Full backup finished {0} ago - the shrink is allowed.' -f (Format-Minutes $age)))
-            $parts += ('{0} down to {1} would free about {2}.' -f (Format-MB $logMB), (Format-MB $target), (Format-MB ($logMB - $target)))
-            if ($r.Recovery -and $r.Recovery -ne 'SIMPLE' -and -not $r.BkLog) {
-                $parts += ('{0} recovery with no log backups: the log will grow back after the shrink. Only the log file is ever shrunk here.' -f $r.Recovery)
-            }
-            if ($r.LogReuseWait -and $r.LogReuseWait -notin @('NOTHING', 'CHECKPOINT')) {
-                $parts += ('SQL reports the log is waiting on {0}, so it may not be able to free much.' -f $r.LogReuseWait)
-            }
-            $text = ($parts -join '  ')
-            $hex = '#A6E3A1'
-        }
-    }
-    $txtShrinkGuard.Text = $text
-    $txtShrinkGuard.Foreground = ColorBrush $hex
-    $btnShrinkLog.IsEnabled = $can
-    if ($script:ShrinkJob) { $btnShrinkLog.IsEnabled = $false }
-}
-function Start-ShrinkJob {
-    if ($script:ShrinkJob) { Set-ShrinkStatus 'A shrink is already running...' '#89B4FA'; return }
-    $r = $script:SqlInfo
-    if (-not $r -or -not $r.Ok -or -not $r.Database) { Set-ShrinkStatus 'Read the SQL tab first (click Refresh).' '#F9E2AF'; return }
-    $target = Get-ShrinkTargetMB
-    $logMB  = [double]$r.LogMB
-    if ($target -ge $logMB) { Set-ShrinkStatus 'The target is not smaller than the log, so nothing would change.' '#F9E2AF'; return }
-    $logs = @($r.Files | Where-Object { $_.FileType -eq 'LOG' })
-    if ($logs.Count -eq 0) { Set-ShrinkStatus 'The log file name could not be read, so the shrink cannot run.' '#F38BA8'; return }
-    $logName = [string](($logs | Sort-Object { [double]$_.SizeMB } -Descending | Select-Object -First 1).Name)
-    $need = [int]$script:ShrinkConfig['FullBackupMin']
-    $age  = Get-LastFullBackupAge
-    if ($age -lt 0) {
-        Set-ShrinkStatus ("No full backup of {0} is on record, so the log was not shrunk. Take a full backup, then try again." -f $r.Database) '#F38BA8'
-        return
-    }
-    if ($age -gt $need) {
-        Set-ShrinkStatus ("The last full backup finished {0} ago. A full backup has to finish within {1} minutes before the log is shrunk." -f (Format-Minutes $age), $need) '#F38BA8'
-        return
-    }
-    $more = ''
-    if ($logs.Count -gt 1) { $more = "`r`n`r`nThis database has $($logs.Count) log files; only $logName is shrunk." }
-    $ans = [System.Windows.MessageBox]::Show(
-        "Shrink the transaction log of $($r.Database) on $($script:GuruSqlServer)?`r`n`r`nFile:  $logName`r`nFrom:  $(Format-MB $logMB)`r`nTo:    $target MB`r`n`r`nSafety net: the full backup of this database finished $(Format-Minutes $age) ago.`r`n`r`nOnly the log file is touched. The data file and the recovery model are left exactly as they are.$more",
-        'Shrink transaction log', 'YesNo', 'Question')
-    if ($ans -ne 'Yes') { return }
-    try {
-        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
-        $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:ShrinkScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument([string]$r.Database).AddArgument($logName).AddArgument([int]$target).AddArgument([int]$need)
-        $script:ShrinkJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
-        $btnShrinkLog.IsEnabled = $false
-        Set-ShrinkStatus "Shrinking the log of $($r.Database)... this can take a minute on a large log." '#89B4FA'
-    } catch {
-        $script:ShrinkJob = $null
-        $btnShrinkLog.IsEnabled = $true
-        Set-ShrinkStatus "Could not start: $($_.Exception.Message)" '#F38BA8'
-    }
-}
-function Complete-ShrinkJob {
-    $job = $script:ShrinkJob
-    $script:ShrinkJob = $null
-    $r = $null
-    try     { $r = @($job.PS.EndInvoke($job.Handle)) | Select-Object -Last 1 }
-    catch   { $r = [PSCustomObject]@{ Ok = $false; Blocked = $false; Error = $_.Exception.Message; Db = ''; File = ''; Before = 0.0; After = 0.0; Message = '' } }
-    finally { try { $job.PS.Dispose(); $job.RS.Close(); $job.RS.Dispose() } catch {} }
-    if (-not $r) {
-        Set-ShrinkStatus 'The shrink returned nothing.' '#F38BA8'
-        $btnShrinkLog.IsEnabled = $true
-        return
-    }
-    if (-not $r.Ok) {
-        $prefix = 'Log shrink failed: '
-        if ($r.Blocked) { $prefix = 'Log shrink not started: ' }
-        Set-ShrinkStatus "$prefix$($r.Error)" '#F38BA8'
-        Add-HistoryEntry -ServiceName "Database $($r.Db)" -Group 'SQL' -OldStatus '' -NewStatus 'Log shrink stopped' -Note $r.Error
-    } else {
-        Set-ShrinkStatus $r.Message '#A6E3A1'
-        Add-HistoryEntry -ServiceName "Database $($r.Db)" -Group 'SQL' -OldStatus ("{0:N1} MB log" -f $r.Before) -NewStatus ("{0:N1} MB log" -f $r.After) -Note 'Transaction log shrunk'
-    }
-    Start-SqlCheck          # re-read sizes and the backup age
-}
-
 function Format-Age($when) {
     if (-not $when) { return '' }
     $ts = (Get-Date) - [datetime]$when
@@ -6858,7 +6558,6 @@ function Complete-SqlCheck {
 
     $msg = "Read from $($script:GuruSqlServer) at $when."
     if (@($r.Notes).Count -gt 0) { $msg += '  ' + (@($r.Notes) -join '  '); Set-SqlStatus $msg '#F9E2AF' } else { Set-SqlStatus $msg '#A6E3A1' }
-    Update-ShrinkUi
 }
 function Get-SqlTabText {
     $r = $script:SqlInfo
@@ -7676,7 +7375,6 @@ $script:Timer.Add_Tick({
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
     if ($script:LogJob      -and $script:LogJob.Handle.IsCompleted)      { Complete-LogOperation }
     if ($script:SqlMaintenanceJob -and $script:SqlMaintenanceJob.Handle.IsCompleted) { Complete-SqlMaintenance }
-    if ($script:ShrinkJob   -and $script:ShrinkJob.Handle.IsCompleted)   { Complete-ShrinkJob }
     if ($script:LoginJob    -and $script:LoginJob.Handle.IsCompleted)    { Complete-LoginJob }
     if ($script:ReaderJob   -and $script:ReaderJob.Handle.IsCompleted)   { Complete-ReaderLoad }
     if ($script:RdPingJob   -and $script:RdPingJob.Handle.IsCompleted)   { Complete-ReaderPing }
@@ -7737,8 +7435,6 @@ $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
 Initialize-LogTabs
-Initialize-MaintUi
-Update-ShrinkUi
 Start-DbVersionCheck
 Initialize-ApUi
 if ($script:ApList.Count -gt 0) { Start-ApJob $false } else { Start-ApJob $true }   # first run finds the APs
