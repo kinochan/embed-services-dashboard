@@ -620,7 +620,7 @@ function Save-Config {
               </DataGrid>
             </Grid>
           </TabItem>
-                    <TabItem Header="Events" Style="{StaticResource SubTabItem}">
+                    <TabItem x:Name="tabEvents" Header="Events" Style="{StaticResource SubTabItem}">
                         <Grid Background="#1E1E2E">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -1774,6 +1774,7 @@ $btnRestartAll    = Get-Ctrl 'btnRestartAll'
 $ServicePanel     = Get-Ctrl 'ServicePanel'
 $HistoryGrid      = Get-Ctrl 'HistoryGrid'
 $EventsGrid       = Get-Ctrl 'EventsGrid'
+$tabEvents        = Get-Ctrl 'tabEvents'
 $chkEventInformation = Get-Ctrl 'chkEventInformation'
 $chkEventWarning = Get-Ctrl 'chkEventWarning'
 $chkEventError = Get-Ctrl 'chkEventError'
@@ -2441,35 +2442,49 @@ function Load-History {
 function Get-ServiceEvents {
     param([int]$Hours = 24, [int]$MaxEvents = 200)
     try {
-        $events = Get-WinEvent -FilterHashtable @{
+        $serviceNames = foreach ($service in $script:ServiceDefs) {
+            $installedService = Get-Service -Name $service.Name -ErrorAction SilentlyContinue
+            $installedDisplay = if ($installedService) { $installedService.DisplayName } else { $null }
+            [PSCustomObject]@{
+                Display = $service.Display
+                Names   = @($service.Name, $service.Display, $installedDisplay) | Where-Object { $_ }
+            }
+        }
+        Get-WinEvent -FilterHashtable @{
             LogName      = 'System'
             ProviderName = 'Service Control Manager'
             StartTime    = (Get-Date).AddHours(-$Hours)
-        } -ErrorAction Stop
-        $results = foreach ($event in $events) {
+        } -ErrorAction Stop | ForEach-Object {
+            $eventRecord = $_
             $matchedService = $null
-            foreach ($service in $script:ServiceDefs) {
-                if (($event.Message -match [regex]::Escape($service.Name)) -or
-                    ($service.Display -and $event.Message -match [regex]::Escape($service.Display))) {
+            $eventService = if ($eventRecord.Properties.Count -gt 0) { [string]$eventRecord.Properties[0].Value } else { '' }
+            foreach ($service in $serviceNames) {
+                if (@($service.Names | Where-Object {
+                    $eventService -eq $_ -or $eventRecord.Message -match [regex]::Escape($_)
+                }).Count -gt 0) {
                     $matchedService = $service.Display
                     break
                 }
             }
-            $relevantLevel = $event.LevelDisplayName -in @('Information', 'Warning', 'Error', 'Critical')
-            $relevantEvent = $event.Id -in @(7031, 7034, 7040, 7045)
-            if ($matchedService -and ($relevantLevel -or $relevantEvent)) {
+            $level = switch ($eventRecord.Level) {
+                1 { 'Critical' }
+                2 { 'Error' }
+                3 { 'Warning' }
+                4 { 'Information' }
+                default { $eventRecord.LevelDisplayName }
+            }
+            if ($matchedService -and $level -in @('Information', 'Warning', 'Error', 'Critical')) {
                 [PSCustomObject]@{
-                    Time        = $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
-                    Level       = $event.LevelDisplayName
-                    EventId     = $event.Id
-                    Source      = $event.ProviderName
+                    Time        = $eventRecord.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                    Level       = $level
+                    EventId     = $eventRecord.Id
+                    Source      = $eventRecord.ProviderName
                     Service     = $matchedService
-                    Message     = ($event.Message -replace "`r", ' ' -replace "`n", ' ')
-                    FullMessage = $event.Message
+                    Message     = ($eventRecord.Message -replace "`r", ' ' -replace "`n", ' ')
+                    FullMessage = $eventRecord.Message
                 }
             }
-        }
-        return $results | Sort-Object Time -Descending | Select-Object -First $MaxEvents
+        } | Select-Object -First $MaxEvents
     } catch {
         if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') { return @() }
         throw
@@ -2483,14 +2498,18 @@ function Refresh-EventsGrid {
 foreach ($levelFilter in @($chkEventInformation, $chkEventWarning, $chkEventError, $chkEventCritical)) {
     $levelFilter.Add_Click({ Update-EventsGridFilter })
 }
-$btnRefreshEvents.Add_Click({
+function Invoke-EventsRefresh {
     try {
         Refresh-EventsGrid
-        $statusBar.Text = 'Event list refreshed.'
+        $statusBar.Text = "Event list refreshed: $($script:EventList.Count) matching events in the last 24 hours."
     } catch {
         $statusBar.Text = "Could not refresh event list: $($_.Exception.Message)"
     }
+}
+$tabEvents.Add_Selected({
+    if ($_.OriginalSource -eq $tabEvents) { Invoke-EventsRefresh }
 })
+$btnRefreshEvents.Add_Click({ Invoke-EventsRefresh })
 $btnClearEvents.Add_Click({
     $script:EventList.Clear()
     Update-EventsGridFilter
