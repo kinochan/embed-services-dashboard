@@ -96,7 +96,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.25'
+$script:AppVersion = '2.25.1'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -636,6 +636,18 @@ function Save-Config {
                                                          VerticalAlignment="Center"
                                                          Text="Windows Event Viewer entries related to monitored services"/>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <CheckBox x:Name="chkEventInformation" Content="Information" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show Information-level events"/>
+                                        <CheckBox x:Name="chkEventWarning" Content="Warning" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show Warning-level events"/>
+                                        <CheckBox x:Name="chkEventError" Content="Error" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,6,0"
+                                                  ToolTip="Show Error-level events"/>
+                                        <CheckBox x:Name="chkEventCritical" Content="Critical" IsChecked="True"
+                                                  Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,10,0"
+                                                  ToolTip="Show Critical-level events"/>
                                         <Button x:Name="btnRefreshEvents" Content="Refresh Events"
                                                         Style="{StaticResource BtnBase}" Margin="0,0,6,0"/>
                                         <Button x:Name="btnClearEvents" Content="Clear View"
@@ -893,7 +905,7 @@ function Save-Config {
         </Grid>
       </TabItem>
             <!-- EMBED program logs -->
-            <TabItem Header="  Logs  " x:Name="tabLogs">
+            <TabItem Header="  Server Logs  " x:Name="tabLogs">
                 <Grid Background="#1E1E2E">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -1762,6 +1774,10 @@ $btnRestartAll    = Get-Ctrl 'btnRestartAll'
 $ServicePanel     = Get-Ctrl 'ServicePanel'
 $HistoryGrid      = Get-Ctrl 'HistoryGrid'
 $EventsGrid       = Get-Ctrl 'EventsGrid'
+$chkEventInformation = Get-Ctrl 'chkEventInformation'
+$chkEventWarning = Get-Ctrl 'chkEventWarning'
+$chkEventError = Get-Ctrl 'chkEventError'
+$chkEventCritical = Get-Ctrl 'chkEventCritical'
 $btnRefreshEvents = Get-Ctrl 'btnRefreshEvents'
 $btnClearEvents   = Get-Ctrl 'btnClearEvents'
 $statRunning      = Get-Ctrl 'statRunning'
@@ -2339,6 +2355,16 @@ function Build-ServiceRows {
 # ------------------------------------------------------------
 $HistoryGrid.ItemsSource = $script:HistoryList
 $EventsGrid.ItemsSource = $script:EventList
+function Update-EventsGridFilter {
+    $visibleLevels = @()
+    if ([bool]$chkEventInformation.IsChecked) { $visibleLevels += 'Information' }
+    if ([bool]$chkEventWarning.IsChecked) { $visibleLevels += 'Warning' }
+    if ([bool]$chkEventError.IsChecked) { $visibleLevels += 'Error' }
+    if ([bool]$chkEventCritical.IsChecked) { $visibleLevels += 'Critical' }
+    $EventsGrid.ItemsSource = @($script:EventList | Where-Object {
+        $_.Level -in $visibleLevels
+    })
+}
 function Add-HistoryEntry {
     param(
         [string]$ServiceName,
@@ -2452,6 +2478,10 @@ function Get-ServiceEvents {
 function Refresh-EventsGrid {
     $script:EventList.Clear()
     foreach ($event in @(Get-ServiceEvents)) { $script:EventList.Add($event) }
+    Update-EventsGridFilter
+}
+foreach ($levelFilter in @($chkEventInformation, $chkEventWarning, $chkEventError, $chkEventCritical)) {
+    $levelFilter.Add_Click({ Update-EventsGridFilter })
 }
 $btnRefreshEvents.Add_Click({
     try {
@@ -2463,6 +2493,7 @@ $btnRefreshEvents.Add_Click({
 })
 $btnClearEvents.Add_Click({
     $script:EventList.Clear()
+    Update-EventsGridFilter
     $statusBar.Text = 'Event view cleared.'
 })
 function Refresh-Summary {
@@ -7623,6 +7654,7 @@ $script:Timer.Add_Tick({
     if ($script:RemoteAdminJob -and $script:RemoteAdminJob.Handle.IsCompleted) { Complete-RemoteAdminTask }
     if ($script:DbVerJob    -and $script:DbVerJob.Handle.IsCompleted)    { Complete-DbVersionCheck }
     if ($script:SqlJob      -and $script:SqlJob.Handle.IsCompleted)      { Complete-SqlCheck }
+    if ($script:LogJob      -and $script:LogJob.Handle.IsCompleted)      { Complete-LogOperation }
     if ($script:SqlMaintenanceJob -and $script:SqlMaintenanceJob.Handle.IsCompleted) { Complete-SqlMaintenance }
     if ($script:ShrinkJob   -and $script:ShrinkJob.Handle.IsCompleted)   { Complete-ShrinkJob }
     if ($script:LoginJob    -and $script:LoginJob.Handle.IsCompleted)    { Complete-LoginJob }
@@ -7684,6 +7716,7 @@ Set-TrayIconColor 'Healthy'
 $statusBar.Text       = "Dashboard ready."
 $statusBarRight.Text  = "Last scan: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
 Initialize-SnapshotUi
+Initialize-LogTabs
 Initialize-MaintUi
 Update-ShrinkUi
 Start-DbVersionCheck
