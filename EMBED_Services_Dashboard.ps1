@@ -90,11 +90,18 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+# Packaged (ps2exe) builds run inside the exe itself rather than powershell.exe
+$script:ExePath = ''
+try {
+    $mainModule = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ([IO.Path]::GetFileName($mainModule) -notmatch '^(powershell|pwsh|powershell_ise)\.exe$') { $script:ExePath = $mainModule }
+} catch {}
 # Elevation check
 $script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $script:IsAdmin) {
-    Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -File `"$PSCommandPath`""
+    if ($script:ExePath) { Start-Process -FilePath $script:ExePath -Verb RunAs }
+    else { Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -File `"$PSCommandPath`"" }
     exit
 }
 # Hide the console window when this process owns it (not when started from an existing terminal)
@@ -3611,8 +3618,8 @@ Initialize-SmtpUi
 # Background job. Reads version.json from the repo; if it is newer (and Download is on) it also fetches the script,
 # checks that it parses as PowerShell and that it declares the version version.json promised.
 $script:UpdateScript = {
-    param($repo, $branch, $token, $currentVersion, $download)
-    $out = [ordered]@{ Ok = $false; Error = ''; Latest = ''; Notes = ''; Newer = $false; File = ''; Content = '' }
+    param($repo, $branch, $token, $currentVersion, $download, $isExe)
+    $out = [ordered]@{ Ok = $false; Error = ''; Latest = ''; Notes = ''; Newer = $false; File = ''; Content = ''; ExeTemp = '' }
     function Get-GitHubText([string]$Repo, [string]$Branch, [string]$Path, [string]$Token) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $h = @{ 'User-Agent' = 'EMBED-Services-Dashboard'; 'Accept' = 'application/vnd.github.raw+json' }
@@ -3631,7 +3638,35 @@ $script:UpdateScript = {
         $out.Notes  = [string]$vj.notes
         $out.Newer  = ([version]$latest -gt [version]$currentVersion)
         $out.Ok     = $true
-        if ($out.Newer -and $download) {
+        if ($out.Newer -and $download -and $isExe) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            $tag   = [string]$vj.releaseTag
+            $asset = [string]$vj.exeAsset
+            if ($tag -notmatch '^[A-Za-z0-9._-]+$') { throw 'version.json does not contain a valid releaseTag.' }
+            if ($asset -notmatch '^[A-Za-z0-9._-]+\.exe$') { throw 'version.json does not name a valid exeAsset (.exe).' }
+            $h = @{ 'User-Agent' = 'EMBED-Services-Dashboard'; 'Accept' = 'application/vnd.github+json' }
+            if ($token) { $h['Authorization'] = "Bearer $token" }
+            $rel = Invoke-RestMethod -Uri ('https://api.github.com/repos/{0}/releases/tags/{1}' -f $repo, $tag) -Headers $h -TimeoutSec 20
+            $a = @($rel.assets | Where-Object { $_.name -eq $asset }) | Select-Object -First 1
+            if (-not $a) { throw "Release $tag has no asset named $asset." }
+            $expected = ''
+            if ($a.PSObject.Properties['digest'] -and [string]$a.digest -match '^sha256:([0-9A-Fa-f]{64})$') { $expected = $Matches[1] }
+            elseif ($vj.PSObject.Properties['exeSha256'] -and [string]$vj.exeSha256 -match '^[0-9A-Fa-f]{64}$') { $expected = [string]$vj.exeSha256 }
+            if (-not $expected) { throw 'No SHA-256 is available for the release asset (GitHub digest or exeSha256 in version.json), so the update was cancelled.' }
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ('EMBED_Dashboard_{0}_{1}.exe' -f $latest, [guid]::NewGuid().ToString('N'))
+            $dh = @{ 'User-Agent' = 'EMBED-Services-Dashboard' }
+            $dlUri = [string]$a.browser_download_url
+            if ($token) { $dh['Authorization'] = "Bearer $token"; $dh['Accept'] = 'application/octet-stream'; $dlUri = [string]$a.url }
+            Invoke-WebRequest -Uri $dlUri -Headers $dh -OutFile $tmp -UseBasicParsing -TimeoutSec 300
+            $actual = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash
+            $magic = [IO.File]::ReadAllBytes($tmp)[0..1]
+            if ($actual -ne $expected -or $magic[0] -ne 0x4D -or $magic[1] -ne 0x5A) {
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                throw 'The downloaded executable failed the SHA-256 check, so the update was cancelled.'
+            }
+            $out.File    = $asset
+            $out.ExeTemp = $tmp
+        } elseif ($out.Newer -and $download) {
             $file = [string]$vj.file
             if ($file -notmatch '^[A-Za-z0-9._-]+\.ps1$') { throw 'version.json does not name a valid .ps1 file.' }
             $content = Get-GitHubText $repo $branch $file $token
@@ -3709,7 +3744,7 @@ function Start-UpdateCheck([bool]$Download) {
         $rs.Open()
         $ps = [powershell]::Create()
         $ps.Runspace = $rs
-        [void]$ps.AddScript($script:UpdateScript.ToString()).AddArgument([string]$c['Repo']).AddArgument([string]$c['Branch']).AddArgument((Get-UpdateToken)).AddArgument([string]$script:AppVersion).AddArgument($Download)
+        [void]$ps.AddScript($script:UpdateScript.ToString()).AddArgument([string]$c['Repo']).AddArgument([string]$c['Branch']).AddArgument((Get-UpdateToken)).AddArgument([string]$script:AppVersion).AddArgument($Download).AddArgument([bool]$script:ExePath)
         $script:UpdateScan = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
         $btnUpdCheck.IsEnabled = $false
     } catch {
@@ -3745,6 +3780,42 @@ function Install-UpdateContent([string]$Content, [string]$NewVersion) {
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$path`""
     [Environment]::Exit(0)
 }
+function Install-UpdateExe([string]$TempExe, [string]$NewVersion) {
+    $exe = [string]$script:ExePath
+    if (-not $exe -or -not (Test-Path -LiteralPath $TempExe)) {
+        Set-UpdateStatus 'Update failed: the downloaded executable is missing.' '#F38BA8'
+        return
+    }
+    try {
+        $dir = Split-Path $exe -Parent
+        $bk  = Join-Path $dir 'Backups'
+        if (-not (Test-Path -LiteralPath $bk)) { [void](New-Item -ItemType Directory -Path $bk) }
+        $bkName = '{0}_v{1}_{2}.bak' -f [IO.Path]::GetFileNameWithoutExtension($exe), $script:AppVersion, (Get-Date).ToString('yyyyMMdd_HHmmss')
+        Copy-Item -LiteralPath $exe -Destination (Join-Path $bk $bkName)
+        Get-ChildItem -LiteralPath $bk -Filter '*.bak' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 | Remove-Item -Force
+        # A running exe cannot overwrite itself: a hidden helper waits for this process to exit, swaps the file, then restarts it.
+        $helper = Join-Path ([IO.Path]::GetTempPath()) ('EMBED_Update_{0}.ps1' -f [guid]::NewGuid().ToString('N'))
+        $lines = @(
+            'param([int]$ProcId, [string]$Src, [string]$Dst)'
+            'try { Wait-Process -Id $ProcId -Timeout 60 -ErrorAction SilentlyContinue } catch {}'
+            'for ($i = 0; $i -lt 30; $i++) {'
+            '    try { Copy-Item -LiteralPath $Src -Destination $Dst -Force -ErrorAction Stop; break } catch { Start-Sleep -Seconds 1 }'
+            '}'
+            'Remove-Item -LiteralPath $Src -Force -ErrorAction SilentlyContinue'
+            'Start-Process -FilePath $Dst'
+            'Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue'
+        )
+        [IO.File]::WriteAllText($helper, ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+        $argList = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -ProcId {1} -Src "{2}" -Dst "{3}"' -f $helper, $PID, $TempExe, $exe
+        Start-Process powershell -WindowStyle Hidden -ArgumentList $argList
+    } catch {
+        Set-UpdateStatus "Update failed: $($_.Exception.Message)" '#F38BA8'
+        return
+    }
+    Set-UpdateStatus "Updated to v$NewVersion - restarting..." '#A6E3A1'
+    try { $script:TrayIcon.Visible = $false; $script:TrayIcon.Dispose() } catch {}
+    [Environment]::Exit(0)
+}
 function Complete-UpdateCheck {
     $scan = $script:UpdateScan
     $script:UpdateScan = $null
@@ -3770,7 +3841,9 @@ function Complete-UpdateCheck {
     $note = ''
     if ($res.Notes) { $note = " - $($res.Notes)" }
     Set-UpdateStatus "Update available: v$($res.Latest)$note" '#F9E2AF'
-    if ($res.Content) {
+    if ($res.ExeTemp) {
+        Install-UpdateExe ([string]$res.ExeTemp) ([string]$res.Latest)
+    } elseif ($res.Content) {
         Install-UpdateContent ([string]$res.Content) ([string]$res.Latest)
     } elseif ($script:UpdateNotified -ne [string]$res.Latest) {
         $script:UpdateNotified = [string]$res.Latest
