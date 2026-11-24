@@ -114,7 +114,7 @@ try {
     $consoleWindow = [Native.Win]::GetConsoleWindow()
     if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
 } catch {}
-$script:AppVersion = '2.25.7'
+$script:AppVersion = '2.25.8'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -905,7 +905,7 @@ function Save-Config {
                             </Grid.ColumnDefinitions>
                             <TextBlock x:Name="txtLogStatus" Grid.Column="0" Foreground="#6C7086" FontSize="12"
                                                  VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"
-                                                 Text="Log files load from C:\Program Files (x86)\ECS7\Logs when this tab opens."/>
+                                                 Text="Log files from the last 5 days load from C:\Program Files (x86)\ECS7\Logs when this tab opens."/>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                 <ComboBox x:Name="cmbLogSeverity" Width="130" SelectedIndex="0" Margin="0,0,6,0"
                                           ToolTip="Show all lines, errors, warnings, or both">
@@ -6680,8 +6680,9 @@ $script:LogScript = {
                 return [PSCustomObject]@{ Ok = $false; Error = "Log folder not found: $root"; Files = @() }
             }
             $rootPrefix = $root.TrimEnd('\') + '\'
+            $cutoff = (Get-Date).AddDays(-5)
             $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '(?i)\.(log|txt|err|out|trace|csv)(\.\d+)*$' } |
+                Where-Object { $_.LastWriteTime -ge $cutoff -and $_.Name -match '(?i)\.(log|txt|err|out|trace|csv)(\.\d+)*$' } |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1000 | ForEach-Object {
                     [PSCustomObject]@{
                         Name = $_.Name
@@ -6867,9 +6868,9 @@ function Complete-LogOperation {
         $script:LastLogScan = Get-Date
         $count = @($result.Files).Count
         if ($count -eq 0) {
-            $txtLogStatus.Text = "No supported text log files found in $($script:LogRoot)."
+            $txtLogStatus.Text = "No supported text log files from the last 5 days found in $($script:LogRoot)."
         } else {
-            $txtLogStatus.Text = "Found $count log file(s) in $($script:LogRoot). Select a program and file; previews show up to the latest 5,000 lines."
+            $txtLogStatus.Text = "Found $count log file(s) from the last 5 days in $($script:LogRoot). Select a program and file; previews show up to the latest 5,000 lines."
         }
         return
     }
