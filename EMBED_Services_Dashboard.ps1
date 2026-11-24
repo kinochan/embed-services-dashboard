@@ -97,7 +97,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.25.4'
+$script:AppVersion = '2.25.5'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -6291,8 +6291,21 @@ $script:SqlMaintenanceScript = {
         Invoke-NonQuery $cn "BACKUP LOG [ECS7] TO DISK = N'$escapedBackupPath';"
         $o.BackupCompleted = $true
 
+        # The active log can sit at the end of the file; extra backup + shrink passes let it wrap back so the file can shrink.
         $o.Stage = 'Shrink'
-        Invoke-NonQuery $cn ("DBCC SHRINKFILE (N'{0}', {1});" -f $escapedLogicalLogName, $shrinkTargetMb)
+        for ($pass = 1; $pass -le 6; $pass++) {
+            Invoke-NonQuery $cn ("DBCC SHRINKFILE (N'{0}', {1});" -f $escapedLogicalLogName, $shrinkTargetMb)
+            $cmd = $cn.CreateCommand()
+            try {
+                $cmd.CommandTimeout = 15
+                $cmd.CommandText = "SELECT CAST(size AS bigint) FROM sys.database_files WHERE name = @fileName AND type_desc = 'LOG'"
+                [void]$cmd.Parameters.AddWithValue('@fileName', $logicalLogName)
+                $currentPages = [long]$cmd.ExecuteScalar()
+            } finally { $cmd.Dispose() }
+            if ($currentPages -le ($shrinkTargetMb * 128) -or $pass -eq 6) { break }
+            Invoke-NonQuery $cn 'CHECKPOINT;'
+            Invoke-NonQuery $cn "BACKUP LOG [ECS7] TO DISK = N'$escapedBackupPath';"
+        }
         $o.ShrinkCompleted = $true
 
         $o.Stage = 'Growth settings'
