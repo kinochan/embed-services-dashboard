@@ -6281,21 +6281,6 @@ $script:SqlMaintenanceScript = {
         $cmd = $cn.CreateCommand()
         try {
             $cmd.CommandTimeout = 15
-            $cmd.CommandText = "SELECT MAX(backup_finish_date) FROM msdb.dbo.backupset WHERE database_name = @databaseName AND type = 'D'"
-            [void]$cmd.Parameters.AddWithValue('@databaseName', 'ECS7')
-            $lastFullBackup = $cmd.ExecuteScalar()
-        } finally { $cmd.Dispose() }
-        if ($null -eq $lastFullBackup -or $lastFullBackup -is [DBNull]) {
-            throw 'No full backup of ECS7 is on record, so log maintenance was not run.'
-        }
-        $fullBackupAge = ((Get-Date) - [datetime]$lastFullBackup).TotalMinutes
-        if ($fullBackupAge -gt $fullBackupMin) {
-            throw ("The last full backup of ECS7 finished {0} minutes ago. It must be within {1} minutes before log maintenance runs." -f [int]$fullBackupAge, $fullBackupMin)
-        }
-
-        $cmd = $cn.CreateCommand()
-        try {
-            $cmd.CommandTimeout = 15
             $cmd.CommandText = "USE [ECS7]; SELECT COUNT(*) FROM sys.database_files WHERE name = @fileName AND type_desc = 'LOG'"
             [void]$cmd.Parameters.AddWithValue('@fileName', $logicalLogName)
             if ([int]$cmd.ExecuteScalar() -lt 1) { throw "Logical log file '$logicalLogName' was not found in database ECS7." }
@@ -6387,18 +6372,8 @@ function Start-SqlMaintenance {
         Set-SqlMaintenanceStatus 'Refresh the SQL tab before running log maintenance.' '#F9E2AF'
         return
     }
-    $fullBackupMin = [int]$script:ShrinkConfig['FullBackupMin']
-    $fullBackupAge = Get-LastFullBackupAge
-    if ($fullBackupAge -lt 0) {
-        Set-SqlMaintenanceStatus 'No full backup of ECS7 is on record, so log maintenance is blocked.' '#F38BA8'
-        return
-    }
-    if ($fullBackupAge -gt $fullBackupMin) {
-        Set-SqlMaintenanceStatus ("The last full backup finished {0} minutes ago. It must be within {1} minutes before log maintenance runs." -f $fullBackupAge, $fullBackupMin) '#F38BA8'
-        return
-    }
     $backupPath = "$directory\ECS7_Log.trn"
-    $confirmText = "Back up and shrink ECS7 log file '$logName' on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`nFull backup age: $fullBackupAge minutes (maximum $fullBackupMin)`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
+    $confirmText = "Back up and shrink ECS7 log file '$logName' on SQL Server $($script:GuruSqlServer)?`r`n`r`nBackup: $backupPath`r`nShrink target: $target MB`r`nGrowth: $growth MB; maximum: 10,240 MB`r`n`r`nThe backup path is on the SQL Server host, and its SQL Server service account must be able to write there. An existing backup file at that path will have another backup set appended. This operation modifies the database. Continue?"
     $answer = [System.Windows.MessageBox]::Show($confirmText, 'Confirm ECS7 log maintenance', 'YesNo', 'Warning')
     if ($answer -ne 'Yes') { return }
     try {
