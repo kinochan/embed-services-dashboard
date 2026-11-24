@@ -1,7 +1,7 @@
 {
-   "version": "2.25.6",
+   "version": "2.25.7",
    "notes": "Detects log timestamps and severity, with error/warning and time-range filters.",
    "file": "EMBED_Services_Dashboard.ps1",
    "exeAsset": "EMBEDDashboard.exe",
-   "releaseTag": "v2.25.6"
+   "releaseTag": "v2.25.7"
 }
