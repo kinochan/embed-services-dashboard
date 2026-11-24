@@ -3646,7 +3646,8 @@ $script:UpdateScript = {
             if ($asset -notmatch '^[A-Za-z0-9._-]+\.exe$') { throw 'version.json does not name a valid exeAsset (.exe).' }
             $h = @{ 'User-Agent' = 'EMBED-Services-Dashboard'; 'Accept' = 'application/vnd.github+json' }
             if ($token) { $h['Authorization'] = "Bearer $token" }
-            $rel = Invoke-RestMethod -Uri ('https://api.github.com/repos/{0}/releases/tags/{1}' -f $repo, $tag) -Headers $h -TimeoutSec 20
+            try { $rel = Invoke-RestMethod -Uri ('https://api.github.com/repos/{0}/releases/tags/{1}' -f $repo, $tag) -Headers $h -TimeoutSec 20 }
+            catch { throw "GitHub has no published release tagged $tag yet. Publish the release with $asset attached, then try again." }
             $a = @($rel.assets | Where-Object { $_.name -eq $asset }) | Select-Object -First 1
             if (-not $a) { throw "Release $tag has no asset named $asset." }
             $expected = ''
