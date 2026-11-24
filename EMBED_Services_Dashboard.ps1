@@ -97,7 +97,7 @@ if (-not $script:IsAdmin) {
     Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.25.3'
+$script:AppVersion = '2.25.4'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -6227,7 +6227,7 @@ $script:SqlScript = {
     [PSCustomObject]$o
 }
 $script:SqlMaintenanceScript = {
-    param($sqlServer, [string]$logicalLogName, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory, [int]$fullBackupMin)
+    param($sqlServer, [string]$logicalLogName, [int]$shrinkTargetMb, [int]$growthMb, [string]$backupDirectory)
     $backupPath = $backupDirectory.TrimEnd('\') + '\ECS7_Log.trn'
     $escapedLogicalLogName = $logicalLogName.Replace("'", "''")
     $quotedLogicalLogName = '[' + $logicalLogName.Replace(']', ']]') + ']'
@@ -6379,7 +6379,7 @@ function Start-SqlMaintenance {
     try {
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
         $ps = [powershell]::Create(); $ps.Runspace = $rs
-        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($logName).AddArgument($target).AddArgument($growth).AddArgument($directory).AddArgument($fullBackupMin)
+        [void]$ps.AddScript($script:SqlMaintenanceScript.ToString()).AddArgument([string]$script:GuruSqlServer).AddArgument($logName).AddArgument($target).AddArgument($growth).AddArgument($directory)
         $script:SqlMaintenanceJob = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
         $btnSqlMaintenance.IsEnabled = $false
         $btnSqlRefresh.IsEnabled = $false
