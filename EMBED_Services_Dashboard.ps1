@@ -94,10 +94,20 @@ Add-Type -AssemblyName System.Drawing
 $script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $script:IsAdmin) {
-    Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
+    Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -File `"$PSCommandPath`""
     exit
 }
-$script:AppVersion = '2.25.5'
+# Hide the console window when this process owns it (not when started from an existing terminal)
+try {
+    Add-Type -Namespace Native -Name Win -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("kernel32.dll")] public static extern uint GetConsoleProcessList(uint[] list, uint count);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'@
+    $consoleWindow = [Native.Win]::GetConsoleWindow()
+    if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
+} catch {}
+$script:AppVersion = '2.25.6'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
