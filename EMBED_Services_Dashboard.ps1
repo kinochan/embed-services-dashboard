@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 EMBED Services Dashboard - Enhanced Edition (Optimized)
 Version 1 was just a simple service monitor. This version is a full-featured WPF dashboard for monitoring and controlling EMBED Windows services.
@@ -114,7 +114,7 @@ try {
     $consoleWindow = [Native.Win]::GetConsoleWindow()
     if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
 } catch {}
-$script:AppVersion = '2.25.8'
+$script:AppVersion = '2.25.9'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -7499,6 +7499,7 @@ $script:Timer.Add_Tick({
 # ------------------------------------------------------------
 Remove-OldHistoryLogs
 Load-History
+Invoke-EventsRefresh
 Build-ServiceRows
 Apply-Filter 'All'
 Update-AllServices
@@ -7518,3 +7519,4 @@ $script:Timer.Start()
 # SHOW WINDOW
 # ------------------------------------------------------------
 $window.ShowDialog() | Out-Null
+

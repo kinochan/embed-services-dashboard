@@ -1,7 +1,7 @@
 {
-   "version": "2.25.8",
-   "notes": "Detects log timestamps and severity, with error/warning and time-range filters.",
-   "file": "EMBED_Services_Dashboard.ps1",
-   "exeAsset": "EMBEDDashboard.exe",
-   "releaseTag": "v2.25.8"
+  "version": "2.25.9",
+  "notes": "Events tab now loads on startup",
+  "file": "EMBED_Services_Dashboard.ps1",
+  "exeAsset": "EMBEDDashboard.exe",
+  "releaseTag": "v2.25.9"
 }
