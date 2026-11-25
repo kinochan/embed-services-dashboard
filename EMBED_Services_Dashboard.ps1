@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 EMBED Services Dashboard - Enhanced Edition (Optimized)
 Version 1 was just a simple service monitor. This version is a full-featured WPF dashboard for monitoring and controlling EMBED Windows services.
@@ -1951,7 +1951,6 @@ $btnApPingWin     = Get-Ctrl 'btnApPingWin'
 $btnApForget      = Get-Ctrl 'btnApForget'
 #Dev Buttons
 $btnDevRemoteAdmin = New-Object System.Windows.Controls.Button   # triggered from the expanded device row
-
 # ------------------------------------------------------------
 # COLOR HELPERS + STATUS/TRAY COLOR
 # ------------------------------------------------------------
@@ -2047,7 +2046,6 @@ function Get-ServiceResourceMetrics {
             Note       = 'Service is not running'
         }
     }
-
     try {
         $serviceProcesses = @(Get-CimInstance -ClassName Win32_Service |
             Where-Object { $_.Name -in $script:ServiceDefs.Name -and $_.State -eq 'Running' -and $_.ProcessId -gt 0 })
@@ -2056,7 +2054,6 @@ function Get-ServiceResourceMetrics {
             $script:PreviousProcessSamples = @{}
             return $metrics
         }
-
         $filter = ($processIds | ForEach-Object { "ProcessId=$_" }) -join ' OR '
         $now = Get-Date
         $processes = @(Get-CimInstance -ClassName Win32_Process -Filter $filter)
@@ -2072,7 +2069,6 @@ function Get-ServiceResourceMetrics {
                 CreationDate       = [string]$process.CreationDate
             }
         }
-
         $processorCount = [Math]::Max(1, [Environment]::ProcessorCount)
         foreach ($service in $serviceProcesses) {
             $processId = [int]$service.ProcessId
@@ -2084,7 +2080,6 @@ function Get-ServiceResourceMetrics {
                 }
                 continue
             }
-
             $previous = $script:PreviousProcessSamples[$processId]
             $cpuPercent = $null
             $readMBps = $null
@@ -2345,7 +2340,6 @@ function Load-History {
         $statEvents.Text = '0'
         return
     }
-
     $entries = New-Object 'System.Collections.Generic.List[PSObject]'
     $files = @(Get-ChildItem -LiteralPath $script:HistoryDir -Filter 'History_*.csv' -File -ErrorAction SilentlyContinue)
     foreach ($file in $files) {
@@ -2374,7 +2368,6 @@ function Load-History {
             $statusBar.Text = "Could not load history from $($file.Name): $($_.Exception.Message)"
         }
     }
-
     foreach ($entry in @($entries | Sort-Object SortTime -Descending)) {
         $script:HistoryList.Add([PSCustomObject]@{
             Time        = $entry.Time
@@ -2581,7 +2574,6 @@ function Register-OfflineEvent {
         $mins = ($now - $script:LastAlertSent[$Def.Name]).TotalMinutes
         if ($mins -lt [int]$c['CooldownMinutes']) { return }
     }
-
     $subject = "[EMBED] $($Def.Display) went offline $($events.Count) times in $($c['WindowMinutes']) min ($env:COMPUTERNAME)"
     $lines = @(
         "EMBED Services Dashboard alert",
@@ -2604,7 +2596,6 @@ function Register-OfflineEvent {
     }
     $lines += ""
     $lines += "Check the service logs and Windows Event Viewer on this server for the underlying cause."
-
     $err = Send-SmtpMessage -Subject $subject -Body ($lines -join "`r`n")
     if ($err) {
         Add-HistoryEntry -ServiceName $Def.Display -Group $Def.Group -OldStatus '' -NewStatus 'Alert Failed' -Note $err
@@ -2913,7 +2904,6 @@ $script:DiscoverScript = {
         } finally { $c.Dispose() }
         return $list
     }
-
     # 1) which networks is this server on?
     $own  = @{}
     $nets = @{}
@@ -2945,7 +2935,6 @@ $script:DiscoverScript = {
         }
     }
     if ($targets.Count -gt 1020) { $targets = $targets[0..1019] }
-
     # 2) ping + RDP port on every address, all at once
     $probes = @()
     foreach ($ip in $targets) {
@@ -2971,7 +2960,6 @@ $script:DiscoverScript = {
         if ($p.Client) { try { $p.Client.Close() } catch {} }
         if ($pingOk -or $rdpOpen) { $hostsOut += @{ Ip = $p.Ip; Rdp = $rdpOpen; Name = '' } }
     }
-
     # 3) names of the ones that answered
     $dnsTasks = @{}
     foreach ($h in $hostsOut) {
@@ -2987,7 +2975,6 @@ $script:DiscoverScript = {
             if ($hn -and $hn -ne $h.Ip) { $h.Name = $hn }
         }
     }
-
     # 4) GURU reader and cash-device IPs (read-only), so they can be hidden
     $readerSet = @{}
     $sqlNote   = ''
@@ -3002,7 +2989,6 @@ $script:DiscoverScript = {
             }
         }
     } catch { $sqlNote = $_.Exception.Message }
-
     $final = @()
     foreach ($h in $hostsOut) {
         $final += [PSCustomObject]@{ Ip = $h.Ip; Name = $h.Name; Rdp = $h.Rdp; Reader = $readerSet.ContainsKey($h.Ip) }
@@ -3183,7 +3169,6 @@ function Update-ServiceRow {
     }
     Update-ServiceResourceMetricDisplay $row $script:ServiceResourceMetrics[$def.Name]
     $wasAuto = $script:AutoOff.ContainsKey($def.Name)
-
     # Not installed on this machine: switch the toggle off automatically and say why
     if ($st.Status -eq 'NotFound') {
         $script:AutoOff[$def.Name] = 'Service not found'
@@ -3202,7 +3187,6 @@ function Update-ServiceRow {
         return
     }
     $row.Restart.IsEnabled = $script:IsAdmin
-
     # Service reappeared: give the toggle back (respecting any manual off)
     if ($wasAuto) {
         $script:AutoOff.Remove($def.Name)
@@ -3211,9 +3195,15 @@ function Update-ServiceRow {
         $row.Toggle.ToolTip   = 'On = monitored and included in Start/Stop/Restart All'
         Add-HistoryEntry -ServiceName $def.Display -Group $def.Group -OldStatus 'Auto Off' -NewStatus 'Auto On' -Note 'Service found - monitoring resumed'
     }
-
     $row.NoteTb.Text = "{0}  |  Startup: {1}" -f $def.Name, $st.StartType
-
+    #Added by Mike
+    if ($st.StartType -eq 'Disabled') {
+        $row.StatusTb.Text = 'Disabled'
+        $row.Dot.Fill      = ColorBrush '#6C7086'
+        $row.Card.Opacity  = 0.5
+        $script:PreviousStates.Remove($def.Name)
+        return
+    }
     # Switched off by the user
     if ($script:DisabledServices.ContainsKey($def.Name)) {
         $row.StatusTb.Text = 'Monitoring off'
@@ -3222,7 +3212,6 @@ function Update-ServiceRow {
         $script:PreviousStates.Remove($def.Name)
         return
     }
-
     $row.Card.Opacity = 1.0
     $old = $script:PreviousStates[$def.Name]
     $script:PreviousStates[$def.Name] = $st.Status
@@ -3354,7 +3343,6 @@ if ($sh -and $sh.Value) {
         $v = 0; if ([int]::TryParse([string]$oldGuard.Value, [ref]$v)) { $script:ShrinkConfig['FullBackupMin'] = $v }
     }
 }
-
 $ss = $config.PSObject.Properties['StationType']
 if ($ss -and $ss.Value) { $script:SsConfig['TypeOverride'] = [string]$ss.Value }
 function New-PackageObject([string]$Name, [string]$Installer, [bool]$WholeFolder, [string]$InstArgs) {
@@ -3908,7 +3896,6 @@ $script:SnapshotScript = {
             }
         } finally { $cn.Dispose() }
     }
-
     Save-Section '02_Service_Details.txt' {
         Get-CimInstance Win32_Service | Where-Object { $svcNames -contains $_.Name } |
             Select-Object Name, DisplayName, State, StartMode, StartName, ExitCode, ProcessId, PathName | Format-List
@@ -4058,7 +4045,6 @@ function Start-Snapshot {
             "",
             (Get-DbVersionText)
         ) | Set-Content (Join-Path $work '00_README.txt') -Encoding UTF8
-
         # The slow parts run in the background so the window doesn't freeze
         $names = [string[]]@($script:ServiceDefs | ForEach-Object { $_.Name })
         $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
@@ -4218,7 +4204,6 @@ $script:RemoteSvcScript = {
             } catch { $log += New-Log $n 'Failed' ('Start: ' + (Get-Deepest $_).Message) }
         }
     }
-
     # $queryNames holds wildcard patterns (e.g. 'TeamViewer*') matched on service name or display name
     $rows = @()
     try {
@@ -4519,7 +4504,6 @@ $script:RemoteAdminWmiScript = {
             $searcher = New-Object System.Management.ManagementObjectSearcher($firewallScope, $query)
             try { return @($searcher.Get()) } finally { $searcher.Dispose() }
         }
-
         switch ($task) {
             'Check' {
                 $inputParams = $registry.GetMethodParameters('GetDWORDValue')
@@ -5104,7 +5088,6 @@ function Complete-DbVersionCheck {
     if (-not $res) { return }
     $prev = $script:DbVer
     $script:DbVer = $res
-
     if (-not $res.Ok) {
         $txtDbVer.Text         = 'No SQL connection'
         $txtDbVer.Foreground   = ColorBrush '#F38BA8'
@@ -5120,7 +5103,6 @@ function Complete-DbVersionCheck {
         $dbBadge.Background    = ColorBrush '#30CBA6F7'
     }
     $dbBadge.ToolTip = (Get-DbVersionText) + "`r`n`r`nClick to copy"
-
     # Log upgrades / changes to History
     if ($prev -and $prev.Ok -and $res.Ok -and $prev.Full -and $res.Full -and $prev.Full -ne $res.Full) {
         Add-HistoryEntry -ServiceName "Database $($res.Database)" -Group 'SQL' -OldStatus $prev.Full -NewStatus $res.Full -Note 'Database version changed'
@@ -5149,7 +5131,6 @@ $script:SoftwareScript = {
         try { $t = $tc.ConnectAsync($computer, 445); $ok = ($t.Wait(3000) -and $tc.Connected) } catch {} finally { $tc.Close() }
         if (-not $ok) { throw "$computer is not answering on port 445 (file sharing). It may be off, the name may be wrong, or its firewall blocks it." }
         if (-not (Test-Path -LiteralPath $installer)) { throw "Installer not found on this server: $installer" }
-
         $file      = Split-Path $installer -Leaf
         $srcDir    = Split-Path $installer -Parent
         $destLocal = Join-Path $stationRoot $pkgName
@@ -5157,7 +5138,6 @@ $script:SoftwareScript = {
         Log "Station folder: $destLocal"
         if (Test-Path -LiteralPath $destUnc) { Log 'Removing the previous copy...'; Remove-Item -LiteralPath $destUnc -Recurse -Force }
         New-Item -ItemType Directory -Path $destUnc -Force | Out-Null
-
         if ($wholeFolder) {
             $size = (Get-ChildItem -LiteralPath $srcDir -Recurse -File | Measure-Object Length -Sum).Sum
             Log ('Copying folder {0} ({1:N1} MB)...' -f $srcDir, ($size / 1MB))
@@ -5179,7 +5159,6 @@ $script:SoftwareScript = {
             Log 'Done.'
             return [PSCustomObject]$res
         }
-
         $instLocal = Join-Path $destLocal $file
         $exitLocal = Join-Path $destLocal '_exitcode.txt'
         $exitUnc   = Join-Path $destUnc '_exitcode.txt'
