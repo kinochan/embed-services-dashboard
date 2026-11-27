@@ -296,7 +296,7 @@ function Save-Config {
 # ------------------------------------------------------------
 # XAML
 # ------------------------------------------------------------
-[xml]$XAML = @"
+[xml]$XAML = @'
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -1720,7 +1720,7 @@ function Save-Config {
     </Border>
   </Grid>
 </Window>
-"@
+'@
 # ------------------------------------------------------------
 # LOAD XAML + GET CONTROLS
 # ------------------------------------------------------------
@@ -1945,6 +1945,7 @@ $dgReaders        = Get-Ctrl 'dgReaders'
 $tabAps           = Get-Ctrl 'tabAps'
 $txtApStatus      = Get-Ctrl 'txtApStatus'
 $btnApUnifi       = Get-Ctrl 'btnApUnifi'
+$btnApFileZilla   = Get-Ctrl 'btnApFileZilla'
 $btnApScan        = Get-Ctrl 'btnApScan'
 $btnApPing        = Get-Ctrl 'btnApPing'
 $btnApCopy        = Get-Ctrl 'btnApCopy'
