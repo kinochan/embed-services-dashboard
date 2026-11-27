@@ -89,6 +89,7 @@ v2.25.7: Minor fixes and improvements to station snapshot and log handling.
 v2.25.8: Minor fixes and improvements to station snapshot and log handling.
 v2.25.9: Minor fixes and improvements to station snapshot and log handling. added in exe detection and handling.
 v2.25.10: Continued improvements to station snapshot, log handling, and exe detection.
+v2.25.11: Adding FileZilla Server FTP server monitoring to the list (FileZilla Server)
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -122,7 +123,7 @@ try {
     $consoleWindow = [Native.Win]::GetConsoleWindow()
     if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
 } catch {}
-$script:AppVersion = '2.25.10'
+$script:AppVersion = '2.25.11'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -135,6 +136,7 @@ $script:ServiceDefs = @(
     [ordered]@{ Name = 'Embed-ESP';         Display = 'EMBED ESP Service';          Group = 'API'  }
     [ordered]@{ Name = 'MSSQLSERVER';       Display = 'SQL Server';                 Group = 'SQL'  }
     [ordered]@{ Name = 'SQLBrowser';        Display = 'SQL Browser';                Group = 'SQL'  }
+    [ordered]@{ Name = 'FileZilla Server';  Display = 'FileZilla Server';           Group = 'FTP'  }
     [ordered]@{ Name = 'TeamViewer';        Display = 'TeamViewer';                 Group = 'Remote'; MonitorOnly = $true }
     [ordered]@{ Name = 'AnyDesk';           Display = 'AnyDesk';                    Group = 'Remote'; MonitorOnly = $true }
 )

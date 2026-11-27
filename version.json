@@ -1,7 +1,7 @@
 {
-  "version": "2.25.10",
-  "notes": "Events tab now loads on startup",
+  "version": "2.25.11",
+  "notes": "Adding FileZilla Server FTP server monitoring to the list (FileZilla Server)",
   "file": "EMBED_Services_Dashboard.ps1",
   "exeAsset": "EMBEDDashboard.exe",
-  "releaseTag": "v2.25.10"
+  "releaseTag": "v2.25.11"
 }
