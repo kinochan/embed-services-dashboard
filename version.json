@@ -1,7 +1,7 @@
 {
-  "version": "2.25.12",
-  "notes": "Adding FileZilla Server FTP server monitoring to the list (FileZilla Server)",
-  "file": "EMBED_Services_Dashboard.ps1",
-  "exeAsset": "EMBEDDashboard.exe",
-  "releaseTag": "v2.25.12"
+    "file":  "EMBED_Services_Dashboard.ps1",
+    "releaseTag":  "v2.25.13",
+    "version":  "2.25.13",
+    "exeAsset":  "EMBEDDashboard.exe",
+    "notes":  "Added FileZilla Server Admin interface button to Access Points tab for quick access"
 }

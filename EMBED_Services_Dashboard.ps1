@@ -123,7 +123,7 @@ try {
     $consoleWindow = [Native.Win]::GetConsoleWindow()
     if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
 } catch {}
-$script:AppVersion = '2.25.12'
+$script:AppVersion = '2.25.13'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
@@ -1054,6 +1054,7 @@ function Save-Config {
                          Text="Pings the access point range to show which APs are live."/>
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="btnApUnifi"  Content="🌐  Open UniFi"  Style="{StaticResource BtnPurple}" Margin="0,0,6,0" ToolTip="Starts the UniFi app on this server if needed, then opens the UniFi dashboard in your browser"/>
+                <Button x:Name="btnApFileZilla" Content="📁  Open FileZilla"   Style="{StaticResource BtnPurple}" Margin="0,0,6,0" ToolTip="Opens the FileZilla Server Admin interface"/>
                 <Button x:Name="btnApScan"   Content="Rescan Range"   Style="{StaticResource BtnBlue}"   Margin="0,0,6,0" ToolTip="Ping every address in the range to find APs"/>
                 <Button x:Name="btnApPing"   Content="↻  Ping Now"    Style="{StaticResource BtnBase}"   Margin="0,0,6,0" ToolTip="Ping the APs already found"/>
                 <Button x:Name="btnApCopy"   Content="Copy"           Style="{StaticResource BtnBase}"/>
@@ -7387,6 +7388,38 @@ $btnApUnifi.Add_Click({
         Set-ApStatus "Started UniFi but could not wait for it: $($_.Exception.Message)" '#F9E2AF'
     }
 })
+
+# FileZilla Server Admin Interface
+$btnApFileZilla.Add_Click({
+    $fzExePath = $null
+    # Look for FileZilla Server Admin Interface in common locations
+    $fzPaths = @(
+        'C:\Program Files\FileZilla Server\FileZilla Server Interface.exe'
+        'C:\Program Files (x86)\FileZilla Server\FileZilla Server Interface.exe'
+        'C:\Program Files\FileZilla Server\filezillaserver-interface.exe'
+        'C:\Program Files (x86)\FileZilla Server\filezillaserver-interface.exe'
+    )
+    
+    foreach ($path in $fzPaths) {
+        if (Test-Path $path) {
+            $fzExePath = $path
+            break
+        }
+    }
+    
+    if ($fzExePath) {
+        try {
+            Start-Process -FilePath $fzExePath
+            Set-ApStatus 'FileZilla Server Admin interface opened successfully.' '#A6E3A1'
+        } catch {
+            Set-ApStatus "Error opening FileZilla: $($_.Exception.Message)" '#F38BA8'
+        }
+    } else {
+        Set-ApStatus 'FileZilla Server Admin interface not found. Is FileZilla Server installed?' '#F38BA8'
+    }
+})
+
+
 function Complete-UnifiWait {
     $job = $script:UnifiJob
     $script:UnifiJob = $null
