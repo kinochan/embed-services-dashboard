@@ -81,6 +81,14 @@ v2.25: Combines the v2.23.11 station snapshots, software deployment, CenterEdge 
     per-service CPU, memory, and disk-rate monitoring, including AnyDesk service monitoring. History entries
     reload from retained daily CSV logs when the dashboard starts.
     v2.25.2: Minor fixes and improvements to station snapshot and log handling. Also removed duplicate sql log entries.
+v2.25.3: Minor fixes and improvements to station snapshot and log handling.
+v2.25.4: Minor fixes and improvements to station snapshot and log handling.
+v2.25.5: Minor fixes and improvements to station snapshot and log handling.
+v2.25.6: Minor fixes and improvements to station snapshot and log handling.
+v2.25.7: Minor fixes and improvements to station snapshot and log handling.
+v2.25.8: Minor fixes and improvements to station snapshot and log handling.
+v2.25.9: Minor fixes and improvements to station snapshot and log handling. added in exe detection and handling.
+v2.25.10: Continued improvements to station snapshot, log handling, and exe detection.
 #>
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -114,7 +122,7 @@ try {
     $consoleWindow = [Native.Win]::GetConsoleWindow()
     if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
 } catch {}
-$script:AppVersion = '2.25.9'
+$script:AppVersion = '2.25.10'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
