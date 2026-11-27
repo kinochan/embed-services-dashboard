@@ -123,7 +123,7 @@ try {
     $consoleWindow = [Native.Win]::GetConsoleWindow()
     if ($consoleWindow -ne [IntPtr]::Zero -and [Native.Win]::GetConsoleProcessList((New-Object 'uint32[]' 4), 4) -le 1) { [void][Native.Win]::ShowWindow($consoleWindow, 0) }
 } catch {}
-$script:AppVersion = '2.25.11'
+$script:AppVersion = '2.25.12'
 $script:SelfPath   = $PSCommandPath      # used by the updater to replace this file
 # Service definitions
 $script:ServiceDefs = @(
